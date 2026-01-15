@@ -94,7 +94,7 @@ function parseCityRateOverrides(raw) {
 
 // Safe defaults for seed ONLY (dev local)
 const SEED_DEFAULTS = {
-  MONGO_URI: "mongodb://127.0.0.1:27017/barber_store",
+  MONGO_URI: "mongodb+srv://mahmoodamara21:Ma144141Ma@cluster0.l5zo4lf.mongodb.net/barber_store?retryWrites=true&w=majority&appName=Cluster0",
   JWT_SECRET: "seed_jwt_secret_1234567890", // >= 16 chars
   STRIPE_SECRET_KEY: "sk_test_seed_dummy",
   STRIPE_WEBHOOK_SECRET: "whsec_seed_dummy",
