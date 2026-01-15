@@ -1,7 +1,7 @@
 // src/middlewares/responseEnvelope.js
 
 import { ENV } from "../utils/env.js";
-import { assertMoneyContractOnResponse, ensureMoneyTwinsOnResponse } from "../utils/money.js";
+import { assertMoneyContractOnResponse } from "../utils/money.js";
 
 /**
  * Response envelope normalizer
@@ -41,7 +41,6 @@ export function responseEnvelope(_req, res, next) {
         const { ok, ...rest } = body;
         // If there's exactly one meaningful key, keep it under data anyway to be consistent
         const payload = { ok: true, data: Object.keys(rest).length ? rest : null };
-        ensureMoneyTwinsOnResponse(payload);
         if (shouldCheckMoney) assertMoneyContractOnResponse(payload);
         return originalJson(payload);
       }
@@ -49,14 +48,12 @@ export function responseEnvelope(_req, res, next) {
       // If ok:false, do not modify (errorHandler should format it)
       if (body.ok === false) return originalJson(body);
 
-      ensureMoneyTwinsOnResponse(body);
       if (shouldCheckMoney) assertMoneyContractOnResponse(body);
       return originalJson(body);
     }
 
     // Wrap arrays/primitives/objects into { ok:true, data: body }
     const payload = { ok: true, data: body ?? null };
-    ensureMoneyTwinsOnResponse(payload);
     if (shouldCheckMoney) assertMoneyContractOnResponse(payload);
     return originalJson(payload);
   };

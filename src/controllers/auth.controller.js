@@ -17,7 +17,6 @@ import {
   setRefreshCookie,
 } from "../utils/authTokens.js";
 import { logger } from "../utils/logger.js";
-import { ENV } from "../utils/env.js";
 import { logAuditSuccess, logAuditFail, AuditActions } from "../services/audit.service.js";
 
 function authError(statusCode, code) {
@@ -167,10 +166,9 @@ export async function resendEmailOtp(req, res) {
   const body = req.validated?.body || req.body || {};
   const emailLower = normalizeEmailLower(body.email);
   const meta = getRequestMeta(req);
-  let result = null;
 
   try {
-    result = await resendEmailOtpService({
+    await resendEmailOtpService({
       email: body.email,
       ip: meta.ip,
       userAgent: meta.userAgent,
@@ -183,11 +181,7 @@ export async function resendEmailOtp(req, res) {
     await logAuditFail(req, AuditActions.AUTH_RESEND_EMAIL_OTP, { type: "User" }, err);
   }
 
-  const response = { ok: true };
-  if (ENV.NODE_ENV !== "production") {
-    response.data = result?.mail || null;
-  }
-  res.json(response);
+  res.json({ ok: true });
 }
 
 export async function refresh(req, res) {

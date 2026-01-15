@@ -29,9 +29,7 @@ function httpError(statusCode, code, message, details) {
 }
 
 function normalizeCode(code) {
-  return String(code || "")
-    .trim()
-    .toUpperCase();
+  return String(code || "").trim().toUpperCase();
 }
 
 function withSessionOpts(opts, session) {
@@ -56,7 +54,9 @@ function isDuplicateKey(err) {
 }
 
 function normalizeRoleList(roles) {
-  return Array.isArray(roles) ? roles.map((r) => String(r || "").trim()).filter(Boolean) : [];
+  return Array.isArray(roles)
+    ? roles.map((r) => String(r || "").trim()).filter(Boolean)
+    : [];
 }
 
 async function reserveUserUsage({ couponId, userId, maxUsesPerUser, session }) {
@@ -124,15 +124,18 @@ function pickAuth(auth) {
     (Array.isArray(auth?.roles) && auth.roles.includes("admin") ? "admin" : null) ||
     "user";
 
-  const userId = auth?.userId || auth?._id || auth?.id || auth?.user?._id || auth?.user?.id || null;
+  const userId =
+    auth?.userId ||
+    auth?._id ||
+    auth?.id ||
+    auth?.user?._id ||
+    auth?.user?.id ||
+    null;
 
-  const roles = Array.isArray(auth?.roles)
-    ? auth.roles
-    : Array.isArray(auth?.user?.roles)
-      ? auth.user.roles
-      : role
-        ? [role]
-        : [];
+  const roles =
+    Array.isArray(auth?.roles) ? auth.roles :
+    Array.isArray(auth?.user?.roles) ? auth.user.roles :
+    role ? [role] : [];
 
   return { role, userId, roles };
 }
@@ -208,9 +211,7 @@ export async function evaluateCoupon({ code, subtotal, currency = null, now = ne
 
   const coupon = await applyQueryBudget(
     Coupon.findOne({ code: normalized })
-      .select(
-        "code type value currency minOrderTotal maxUsesTotal usesTotal startsAt endsAt isActive",
-      )
+      .select("code type value currency minOrderTotal maxUsesTotal usesTotal startsAt endsAt isActive")
       .lean(),
   );
 
@@ -290,22 +291,14 @@ export async function applyCouponToOrder({ orderId, auth, code, options = {} }) 
     const orderCurrency = normalizeCurrency(order.pricing?.currency);
     const couponCurrencyApply = normalizeCurrency(coupon.currency);
     if (orderCurrency && couponCurrencyApply && orderCurrency !== couponCurrencyApply) {
-      throw httpError(
-        409,
-        "COUPON_CURRENCY_MISMATCH",
-        "Coupon currency does not match order currency",
-      );
+      throw httpError(409, "COUPON_CURRENCY_MISMATCH", "Coupon currency does not match order currency");
     }
 
     const subtotal = order.pricing?.subtotal ?? 0;
     ensureIntMinor(subtotal, "pricing.subtotal");
 
     if (coupon.minOrderTotal && subtotal < coupon.minOrderTotal) {
-      throw httpError(
-        400,
-        "COUPON_MIN_ORDER_NOT_MET",
-        "Order subtotal does not meet coupon minimum",
-      );
+      throw httpError(409, "COUPON_MIN_ORDER_NOT_MET", "Order subtotal does not meet coupon minimum");
     }
 
     const allowedUserIds = Array.isArray(coupon.allowedUserIds)
@@ -316,11 +309,7 @@ export async function applyCouponToOrder({ orderId, auth, code, options = {} }) 
 
     if (allowedUserIds.length) {
       if (!redemptionUserId || !allowedUserIds.includes(String(redemptionUserId))) {
-        throw httpError(
-          403,
-          "COUPON_NOT_ELIGIBLE_FOR_USER",
-          "Coupon is not available for this user",
-        );
+        throw httpError(403, "COUPON_NOT_ELIGIBLE_FOR_USER", "Coupon is not available for this user");
       }
     }
 
@@ -337,11 +326,7 @@ export async function applyCouponToOrder({ orderId, auth, code, options = {} }) 
 
       const hasRole = targetRoles.some((r) => allowedRoles.includes(r));
       if (!hasRole) {
-        throw httpError(
-          403,
-          "COUPON_NOT_ELIGIBLE_FOR_USER",
-          "Coupon is not available for this user",
-        );
+        throw httpError(403, "COUPON_NOT_ELIGIBLE_FOR_USER", "Coupon is not available for this user");
       }
     }
 
@@ -351,12 +336,7 @@ export async function applyCouponToOrder({ orderId, auth, code, options = {} }) 
 
     // If order already has another coupon => remove it first (release)
     if (order.coupon?.code) {
-      await removeCouponFromOrder({
-        orderId: order._id,
-        auth,
-        _internal: true,
-        options: { session: s },
-      });
+      await removeCouponFromOrder({ orderId: order._id, auth, _internal: true, options: { session: s } });
       const reloaded = await applyQueryBudget(withSessionQuery(Order.findById(order._id), s));
       if (!reloaded) throw httpError(404, "ORDER_NOT_FOUND", "Order not found");
       order.set(reloaded.toObject());
@@ -366,66 +346,35 @@ export async function applyCouponToOrder({ orderId, auth, code, options = {} }) 
     const currencySnapshot = orderCurrency || couponCurrencyApply || "ILS";
 
     // 1) Reserve redemption (upsert). Unique (couponId, orderId) makes this idempotent.
-    let redemption = await applyQueryBudget(
-      withSessionQuery(CouponRedemption.findOne({ couponId: coupon._id, orderId: order._id }), s),
+    const rawRes = await CouponRedemption.findOneAndUpdate(
+      { couponId: coupon._id, orderId: order._id },
+      {
+        $setOnInsert: {
+          couponId: coupon._id,
+          orderId: order._id,
+          userId: redemptionUserId,
+          code: normalized,
+          status: "reserved",
+          reservedAt: now,
+          discountTotalMinor: discountMinor,
+          currencySnapshot,
+        },
+        $set: {
+          status: "reserved",
+          reservedAt: now,
+          confirmedAt: null,
+          releasedAt: null,
+          userId: redemptionUserId,
+          code: normalized,
+          discountTotalMinor: discountMinor,
+          currencySnapshot,
+        },
+      },
+      withSessionOpts({ upsert: true, new: false, rawResult: true }, s),
     );
 
-    let prevRedemption = redemption ? redemption.toObject() : null;
-    let wasInserted = false;
-
-    if (!redemption) {
-      try {
-        const created = await CouponRedemption.create(
-          [
-            {
-              couponId: coupon._id,
-              orderId: order._id,
-              userId: redemptionUserId,
-              code: normalized,
-              status: "reserved",
-              reservedAt: now,
-              confirmedAt: null,
-              releasedAt: null,
-              discountTotalMinor: discountMinor,
-              currencySnapshot,
-            },
-          ],
-          withSessionOpts({}, s),
-        );
-        redemption = created?.[0] || null;
-        wasInserted = true;
-      } catch (err) {
-        if (!isDuplicateKey(err)) throw err;
-        redemption = await applyQueryBudget(
-          withSessionQuery(
-            CouponRedemption.findOne({ couponId: coupon._id, orderId: order._id }),
-            s,
-          ),
-        );
-        prevRedemption = redemption ? redemption.toObject() : null;
-      }
-    }
-
-    if (!redemption) {
-      throw httpError(
-        500,
-        "COUPON_REDEMPTION_CREATE_FAILED",
-        "Failed to reserve coupon redemption",
-      );
-    }
-
-    if (!wasInserted) {
-      redemption.status = "reserved";
-      redemption.reservedAt = now;
-      redemption.confirmedAt = null;
-      redemption.releasedAt = null;
-      redemption.userId = redemptionUserId;
-      redemption.code = normalized;
-      redemption.discountTotalMinor = discountMinor;
-      redemption.currencySnapshot = currencySnapshot;
-      await redemption.save(withSessionOpts({}, s));
-    }
-
+    const prevRedemption = rawRes.value || null;
+    const wasInserted = rawRes?.lastErrorObject?.updatedExisting === false;
     const shouldCount = wasInserted || prevRedemption?.status === "released";
 
     const rollbackRedemption = async () => {
@@ -456,13 +405,18 @@ export async function applyCouponToOrder({ orderId, auth, code, options = {} }) 
       );
     };
 
+    let redemption = prevRedemption;
+    if (!redemption) {
+      redemption = await applyQueryBudget(
+        withSessionQuery(
+          CouponRedemption.findOne({ couponId: coupon._id, orderId: order._id }),
+          s,
+        ),
+      );
+    }
     if (!redemption) {
       await rollbackRedemption();
-      throw httpError(
-        500,
-        "COUPON_REDEMPTION_CREATE_FAILED",
-        "Failed to reserve coupon redemption",
-      );
+      throw httpError(500, "COUPON_REDEMPTION_CREATE_FAILED", "Failed to reserve coupon redemption");
     }
 
     let userUsageIncremented = false;
@@ -542,11 +496,7 @@ export async function removeCouponFromOrder({ orderId, auth, _internal = false, 
       ensureOrderAuthz(order, auth);
 
       if (!isEditableOrderStatus(order.status)) {
-        throw httpError(
-          409,
-          "ORDER_NOT_EDITABLE",
-          "Order cannot be modified in its current status",
-        );
+        throw httpError(409, "ORDER_NOT_EDITABLE", "Order cannot be modified in its current status");
       }
     }
 
@@ -554,7 +504,10 @@ export async function removeCouponFromOrder({ orderId, auth, _internal = false, 
     if (!currentCode) return order; // idempotent
 
     const coupon = await applyQueryBudget(
-      withSessionQuery(Coupon.findOne({ code: currentCode }).select("_id code").lean(), s),
+      withSessionQuery(
+        Coupon.findOne({ code: currentCode }).select("_id code").lean(),
+        s,
+      ),
     );
 
     if (coupon) {
@@ -576,11 +529,15 @@ export async function removeCouponFromOrder({ orderId, auth, _internal = false, 
 // Confirm coupon on paid order (webhook hook)
 // --------------------
 export async function confirmCouponForPaidOrder(orderId) {
-  const order = await applyQueryBudget(Order.findById(orderId).select("coupon.code").lean());
+  const order = await applyQueryBudget(
+    Order.findById(orderId).select("coupon.code").lean(),
+  );
   if (!order?.coupon?.code) return;
 
   const code = normalizeCode(order.coupon.code);
-  const coupon = await applyQueryBudget(Coupon.findOne({ code }).select("_id").lean());
+  const coupon = await applyQueryBudget(
+    Coupon.findOne({ code }).select("_id").lean(),
+  );
   if (!coupon) return;
 
   await CouponRedemption.findOneAndUpdate(

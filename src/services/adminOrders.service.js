@@ -3,7 +3,6 @@ import Stripe from "stripe";
 
 import { Order } from "../models/Order.js";
 import { User } from "../models/User.js";
-import { StockReservation } from "../models/StockReservation.js";
 import { ENV } from "../utils/env.js";
 import { applyQueryBudget } from "../utils/queryBudget.js";
 import {
@@ -17,11 +16,9 @@ import { assertOrderTransition, ORDER_STATUS, ORDER_SYSTEM_MANAGED_STATUSES } fr
 
 import { releaseReservedStockBulk } from "./stock.service.js";
 import { removeCouponFromOrder } from "./coupon.service.js";
-import { confirmPromotionsForOrder, releasePromotionsForOrder } from "./promotion.service.js";
+import { releasePromotionsForOrder } from "./promotion.service.js";
 import { withRequiredTransaction } from "../utils/mongoTx.js";
 import { confirmPaidOrderStock } from "./payment.service.js";
-import { confirmCouponForPaidOrder } from "./coupon.service.js";
-import { enqueueJob } from "../jobs/jobRunner.js";
 
 const stripe = new Stripe(ENV.STRIPE_SECRET_KEY);
 
@@ -48,14 +45,6 @@ function safeStr(v, max = 300) {
 function safeCode(v, max = 80) {
   const s = String(v ?? "").trim();
   return s.length ? (s.length > max ? s.slice(0, max) : s) : null;
-}
-
-function ensureMinorInt(v, field) {
-  const n = Number(v);
-  if (!Number.isInteger(n) || n < 0) {
-    throw httpError(500, "INVALID_MONEY_UNIT", `${field} must be integer >= 0`);
-  }
-  return n;
 }
 
 function normRoles(roles) {
@@ -133,15 +122,12 @@ function refundRulesSummary(order, ctx) {
 function computeAdminOrderActions(order, ctx) {
   const status = String(order?.status || "");
   const stockStatus = String(order?.stock?.status || "");
-  const provider = String(order?.payment?.provider || "");
   return {
-    canCancel: status === ORDER_STATUS.DRAFT || status === ORDER_STATUS.PENDING_PAYMENT || status === ORDER_STATUS.COD_PENDING_APPROVAL,
+    canCancel: status === ORDER_STATUS.DRAFT || status === ORDER_STATUS.PENDING_PAYMENT,
     canFulfill: status === ORDER_STATUS.STOCK_CONFIRMED && stockStatus === "confirmed",
-    canUpdateTracking: ![ORDER_STATUS.DRAFT, ORDER_STATUS.PENDING_PAYMENT, ORDER_STATUS.COD_PENDING_APPROVAL, ORDER_STATUS.CANCELLED].includes(status),
+    canUpdateTracking: ![ORDER_STATUS.DRAFT, ORDER_STATUS.PENDING_PAYMENT, ORDER_STATUS.CANCELLED].includes(status),
     canAddNote: true,
     canRefund: refundRulesSummary(order, ctx),
-    canCodAccept: status === ORDER_STATUS.COD_PENDING_APPROVAL && provider === "cod",
-    canCodReject: status === ORDER_STATUS.COD_PENDING_APPROVAL && provider === "cod",
   };
 }
 
@@ -569,7 +555,7 @@ export async function adminResolvePayment(
   ctx = {},
 ) {
   const op = String(action || "");
-  if (!["retry_stock_confirm", "mark_requires_refund", "mark_cod_paid"].includes(op)) {
+  if (!["retry_stock_confirm", "mark_requires_refund"].includes(op)) {
     throw httpError(400, "INVALID_ACTION", "Invalid action");
   }
 
@@ -590,55 +576,6 @@ export async function adminResolvePayment(
           stockStatus: order.stock?.status || null,
         });
       }
-    }
-
-    let shouldConfirmStock = false;
-    if (op === "mark_cod_paid") {
-      const provider = String(order?.payment?.provider || "");
-      if (provider !== "cod") {
-        throw httpError(409, "ORDER_NOT_ELIGIBLE", "Order is not eligible for COD payment capture", {
-          provider,
-        });
-      }
-
-      const eligibleStatuses = new Set([
-        ORDER_STATUS.PENDING_PAYMENT,
-        ORDER_STATUS.PAYMENT_RECEIVED,
-        ORDER_STATUS.STOCK_CONFIRMED,
-        ORDER_STATUS.PAID_LEGACY,
-      ]);
-      if (!eligibleStatuses.has(String(order.status))) {
-        throw httpError(409, "ORDER_NOT_ELIGIBLE", "Order is not eligible for COD payment capture", {
-          status: order.status,
-        });
-      }
-
-      const amount = ensureMinorInt(order?.pricing?.grandTotal ?? 0, "pricing.grandTotal");
-      const currency = String(order?.pricing?.currency || order?.payment?.currency || ENV.STRIPE_CURRENCY || "ILS").toUpperCase();
-
-      if (order.status === ORDER_STATUS.PENDING_PAYMENT) {
-        order.statusHistory = order.statusHistory || [];
-        order.statusHistory.push({ status: "payment_received", at: now, note: "cod:cash_received" });
-        assertOrderTransition(order.status, ORDER_STATUS.PAYMENT_RECEIVED);
-        order.status = ORDER_STATUS.PAYMENT_RECEIVED;
-        order.stock = order.stock || {};
-        order.stock.status = order.stock.status || "reserved";
-        order.stock.lastError = null;
-      }
-
-      order.payment = order.payment || {};
-      order.payment.provider = "cod";
-      order.payment.status = "captured";
-      order.payment.amountCaptured = amount;
-      order.payment.currency = currency;
-      order.payment.checkoutAmount = order.payment.checkoutAmount ?? amount;
-      order.payment.checkoutCurrency = order.payment.checkoutCurrency ?? currency;
-      order.payment.lastError = null;
-      if (!order.payment.paidAt) {
-        order.payment.paidAt = now;
-      }
-
-      shouldConfirmStock = order.status === ORDER_STATUS.PAYMENT_RECEIVED || order.status === ORDER_STATUS.PAID_LEGACY;
     }
 
     if (op === "mark_requires_refund") {
@@ -667,10 +604,6 @@ export async function adminResolvePayment(
 
     await order.save({ session });
 
-    if (op === "mark_cod_paid" && shouldConfirmStock) {
-      await confirmPaidOrderStock(order._id, { session });
-    }
-
     const fields =
       "orderNumber userId guestEmail lang status items pricing coupon promotionCode promotions shippingAddress billingAddress shippingMethod " +
       "expiresAt payment invoiceStatus invoiceRef invoiceUrl invoiceIssuedAt cancel refund statusHistory tracking trackingHistory adminNotes stock statusChangedAt statusChangedBy createdAt updatedAt";
@@ -683,207 +616,6 @@ export async function adminResolvePayment(
 
     return toAdminOrderDTO(fresh, { compact: false, ctx });
   });
-
-  if (op === "mark_cod_paid" && updated?.status === ORDER_STATUS.STOCK_CONFIRMED) {
-    await enqueueJob({
-      name: "invoice_email",
-      payload: { orderId: String(orderId) },
-      dedupeKey: `invoice:${String(orderId)}`,
-      runAt: new Date(),
-      maxAttempts: 8,
-    });
-    await confirmCouponForPaidOrder(orderId);
-    await confirmPromotionsForOrder(orderId);
-  }
 
   return updated;
-}
-
-/**
- * Admin COD Accept
- * - Transitions order from cod_pending_approval → pending_payment
- * - Extends expiresAt with COD_HOLD_TTL_HOURS
- * - Extends StockReservation expiresAt to match
- */
-export async function adminCodAccept(orderId, { note } = {}, ctx = {}) {
-  const trimmed = safeStr(note, 500);
-  const now = new Date();
-
-  return await withRequiredTransaction(async (session) => {
-    const order = await applyQueryBudget(
-      Order.findById(orderId).session(session),
-    );
-    if (!order) throw httpError(404, "ORDER_NOT_FOUND", "Order not found");
-
-    if (order.status !== ORDER_STATUS.COD_PENDING_APPROVAL) {
-      throw httpError(409, "ORDER_NOT_ELIGIBLE", "Order is not in cod_pending_approval status", {
-        status: order.status,
-      });
-    }
-
-    const provider = String(order?.payment?.provider || "");
-    if (provider !== "cod") {
-      throw httpError(409, "ORDER_NOT_ELIGIBLE", "Order is not a COD order", { provider });
-    }
-
-    const codHoldTtlHours = Number(ENV.COD_HOLD_TTL_HOURS || 72);
-    const newExpiresAt = new Date(now.getTime() + codHoldTtlHours * 60 * 60_000);
-
-    assertOrderTransition(order.status, ORDER_STATUS.PENDING_PAYMENT);
-    order.status = ORDER_STATUS.PENDING_PAYMENT;
-    order.expiresAt = newExpiresAt;
-    order.statusHistory = order.statusHistory || [];
-    order.statusHistory.push({
-      status: "pending_payment",
-      at: now,
-      note: trimmed ? `cod:admin_accepted - ${trimmed}` : "cod:admin_accepted",
-    });
-
-    const actor = await buildActorSnapshot(ctx);
-    order.statusChangedAt = now;
-    order.statusChangedBy = actor;
-
-    // Append admin note for traceability
-    order.adminNotes = Array.isArray(order.adminNotes) ? order.adminNotes : [];
-    order.adminNotes.push({
-      at: now,
-      actorId: asObjectIdOrNull(ctx?.actorId),
-      roles: normRoles(ctx?.roles),
-      note: trimmed ? `[cod:accept] ${trimmed}` : "[cod:accept]",
-    });
-
-    await order.save({ session });
-
-    // Extend stock reservations
-    await StockReservation.updateMany(
-      { orderId: order._id, status: "reserved" },
-      { $set: { expiresAt: newExpiresAt } },
-      { session },
-    );
-
-    const fields =
-      "orderNumber userId guestEmail lang status items pricing coupon promotionCode promotions shippingAddress billingAddress shippingMethod " +
-      "expiresAt payment invoiceStatus invoiceRef invoiceUrl invoiceIssuedAt cancel refund statusHistory tracking trackingHistory adminNotes stock statusChangedAt statusChangedBy createdAt updatedAt";
-
-    const fresh = await Order.findById(order._id)
-      .select(fields)
-      .session(session)
-      .lean();
-    if (!fresh) throw httpError(404, "ORDER_NOT_FOUND", "Order not found");
-
-    return toAdminOrderDTO(fresh, { compact: false, ctx });
-  });
-}
-
-/**
- * Admin COD Reject
- * - Transitions order from cod_pending_approval → cancelled
- * - Releases stock reservations
- * - Releases coupons/promotions
- */
-export async function adminCodReject(orderId, { reason, note } = {}, ctx = {}) {
-  const trimmedReason = safeStr(reason, 300);
-  const trimmedNote = safeStr(note, 500);
-  const now = new Date();
-
-  return await withRequiredTransaction(async (session) => {
-    const order = await applyQueryBudget(
-      Order.findById(orderId).session(session),
-    );
-    if (!order) throw httpError(404, "ORDER_NOT_FOUND", "Order not found");
-
-    if (order.status !== ORDER_STATUS.COD_PENDING_APPROVAL) {
-      throw httpError(409, "ORDER_NOT_ELIGIBLE", "Order is not in cod_pending_approval status", {
-        status: order.status,
-      });
-    }
-
-    const provider = String(order?.payment?.provider || "");
-    if (provider !== "cod") {
-      throw httpError(409, "ORDER_NOT_ELIGIBLE", "Order is not a COD order", { provider });
-    }
-
-    // Release stock
-    if (order.stock?.status === "reserved" || !order.stock) {
-      try {
-        await releaseReservedStockBulk(order._id, order.items || [], {
-          session,
-          requireActive: false,
-          reason: "cod_reject",
-          allowLegacy: true,
-        });
-        order.stock = order.stock || {};
-        order.stock.status = "released";
-        order.stock.releasedAt = now;
-        order.stock.lastError = null;
-      } catch (e) {
-        order.stock = order.stock || {};
-        order.stock.status = "confirm_failed";
-        order.stock.lastError = String(e?.message || e).slice(0, 200);
-      }
-    }
-
-    // Release coupon
-    if (order.coupon?.code) {
-      try {
-        await removeCouponFromOrder({
-          orderId: order._id,
-          auth: { role: "system" },
-          _internal: true,
-          options: { session },
-        });
-      } catch {
-        // best-effort
-      }
-    }
-
-    // Release promotions
-    if (Array.isArray(order.promotions) && order.promotions.length) {
-      try {
-        await releasePromotionsForOrder({ orderId: order._id, session });
-      } catch {
-        // best-effort
-      }
-    }
-
-    assertOrderTransition(order.status, ORDER_STATUS.CANCELLED);
-    order.status = ORDER_STATUS.CANCELLED;
-    order.cancel = order.cancel || {};
-    order.cancel.canceledAt = now;
-    order.cancel.canceledBy = "admin";
-    order.cancel.reason = trimmedReason || "cod_rejected";
-    order.statusHistory = order.statusHistory || [];
-    order.statusHistory.push({
-      status: "cancelled",
-      at: now,
-      note: trimmedNote ? `cod:admin_rejected - ${trimmedNote}` : "cod:admin_rejected",
-    });
-
-    const actor = await buildActorSnapshot(ctx);
-    order.statusChangedAt = now;
-    order.statusChangedBy = actor;
-
-    // Append admin note for traceability
-    order.adminNotes = Array.isArray(order.adminNotes) ? order.adminNotes : [];
-    order.adminNotes.push({
-      at: now,
-      actorId: asObjectIdOrNull(ctx?.actorId),
-      roles: normRoles(ctx?.roles),
-      note: trimmedNote ? `[cod:reject] ${trimmedNote}` : `[cod:reject] ${trimmedReason || "no reason"}`,
-    });
-
-    await order.save({ session });
-
-    const fields =
-      "orderNumber userId guestEmail lang status items pricing coupon promotionCode promotions shippingAddress billingAddress shippingMethod " +
-      "expiresAt payment invoiceStatus invoiceRef invoiceUrl invoiceIssuedAt cancel refund statusHistory tracking trackingHistory adminNotes stock statusChangedAt statusChangedBy createdAt updatedAt";
-
-    const fresh = await Order.findById(order._id)
-      .select(fields)
-      .session(session)
-      .lean();
-    if (!fresh) throw httpError(404, "ORDER_NOT_FOUND", "Order not found");
-
-    return toAdminOrderDTO(fresh, { compact: false, ctx });
-  });
 }

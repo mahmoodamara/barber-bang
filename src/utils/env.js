@@ -184,11 +184,6 @@ const envSchema = z.object({
   // Orders
   ORDER_PAYMENT_TTL_MINUTES: z.preprocess(toInt, z.number().int().positive().default(30)),
 
-  // COD workflow
-  COD_APPROVAL_TTL_MINUTES: z.preprocess(toInt, z.number().int().positive().default(60)),
-  COD_HOLD_TTL_HOURS: z.preprocess(toInt, z.number().int().positive().default(72)),
-  COD_MAX_OPEN_ORDERS_PER_USER: z.preprocess(toInt, z.number().int().positive().default(3)),
-
   // Idempotency
   IDEMPOTENCY_TTL_HOURS: z.preprocess(toInt, z.number().int().positive().default(24)),
   IDEMPOTENCY_MAX_BODY_BYTES: z.preprocess(toInt, z.number().int().positive().default(10_000)),

@@ -31,7 +31,6 @@ export async function setForOrder(req, res) {
       orderId: req.params.id,
       auth,
       shippingMethodId: body.shippingMethodId,
-      pickupLocation: body.pickupLocation,
       lang: req.lang,
     });
 

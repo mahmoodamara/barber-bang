@@ -4,10 +4,8 @@ import { Router } from "express";
 import { requireAuth } from "../../middlewares/auth.js";
 import { asyncHandler } from "../../middlewares/asyncHandler.js";
 import { validate } from "../../middlewares/validate.js";
-import { attachShippingMethodCode } from "../../middlewares/attachShippingMethodCode.js";
 import {
   createOrderSchema,
-  checkoutSchema,
   orderQuoteSchema,
   updateOrderAddressSchema,
 } from "../../validators/order.validators.js";
@@ -85,7 +83,6 @@ router.post(
     messageCode: "CHECKOUT_RATE_LIMIT",
   }),
   idempotencyEnforce({ routeName: "orders:checkout", required: true }),
-  validate(checkoutSchema),
   asyncHandler(createCheckout),
 );
 
@@ -162,7 +159,6 @@ router.post(
     messageCode: "ORDERS_RATE_LIMIT",
   }),
   idempotencyEnforce({ routeName: "orders:shipping:set", required: true }),
-  attachShippingMethodCode,
   validate(setOrderShippingMethodSchema),
   asyncHandler(setForOrder),
 );

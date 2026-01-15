@@ -6,8 +6,6 @@ import { normalizeCurrency } from "../utils/money.js";
 import { computeTax } from "./tax.service.js";
 import { repriceOrder } from "./reprice.service.js";
 
-const SELF_PICKUP_CODE = "SELF_PICKUP";
-
 function httpError(statusCode, code, message, details) {
   const err = new Error(message || code);
   err.statusCode = statusCode;
@@ -56,7 +54,6 @@ function normalizeNullableMinor(v) {
 }
 
 function computeShippingPriceMinor(method, payableSubtotalMinor) {
-  if (String(method?.code || "").toUpperCase() === SELF_PICKUP_CODE) return 0;
   const basePrice = normalizeNullableMinor(method.basePrice) ?? 0;
   const freeAbove = normalizeNullableMinor(method.freeAbove);
   if (freeAbove !== null && payableSubtotalMinor >= freeAbove) return 0;

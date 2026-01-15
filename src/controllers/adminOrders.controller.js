@@ -1,7 +1,5 @@
 import {
   adminAddOrderNote as adminAddOrderNoteSvc,
-  adminCodAccept as adminCodAcceptSvc,
-  adminCodReject as adminCodRejectSvc,
   adminGetOrder as adminGetOrderSvc,
   adminListOrders as adminListOrdersSvc,
   adminResolvePayment as adminResolvePaymentSvc,
@@ -122,50 +120,6 @@ export async function adminResolvePayment(req, res) {
   } catch (err) {
     await logAuditFail(req, AuditActions.ADMIN_ORDER_PAYMENT_RESOLVE, { type: "Order", id }, err, {
       meta: { action: body.action },
-    });
-    throw err;
-  }
-}
-
-export async function adminCodAccept(req, res) {
-  const id = req.validated?.params?.id || req.params?.id;
-  const body = req.validated?.body || {};
-
-  try {
-    const out = await adminCodAcceptSvc(id, body, ctx(req));
-
-    await logAuditSuccess(
-      req,
-      AuditActions.ADMIN_COD_ACCEPT,
-      { type: "Order", id },
-      { meta: { noteLen: String(body.note || "").length }, message: "Admin COD order accepted" },
-    );
-
-    return res.json({ ok: true, data: out });
-  } catch (err) {
-    await logAuditFail(req, AuditActions.ADMIN_COD_ACCEPT, { type: "Order", id }, err);
-    throw err;
-  }
-}
-
-export async function adminCodReject(req, res) {
-  const id = req.validated?.params?.id || req.params?.id;
-  const body = req.validated?.body || {};
-
-  try {
-    const out = await adminCodRejectSvc(id, body, ctx(req));
-
-    await logAuditSuccess(
-      req,
-      AuditActions.ADMIN_COD_REJECT,
-      { type: "Order", id },
-      { meta: { reason: body.reason || null, noteLen: String(body.note || "").length }, message: "Admin COD order rejected" },
-    );
-
-    return res.json({ ok: true, data: out });
-  } catch (err) {
-    await logAuditFail(req, AuditActions.ADMIN_COD_REJECT, { type: "Order", id }, err, {
-      meta: { reason: body.reason || null },
     });
     throw err;
   }

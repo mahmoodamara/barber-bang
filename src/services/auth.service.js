@@ -425,15 +425,13 @@ export async function resetPassword({ token, password }) {
 // 6) Expired token rejected.
 
 export async function issueEmailVerificationOtp({ user, ip, userAgent, requestId } = {}) {
-  if (!user || user.emailVerified) {
-    return { ok: true, mail: { sent: false, skipped: true, reason: "USER_MISSING_OR_VERIFIED" } };
-  }
+  if (!user || user.emailVerified) return { ok: true };
 
   const now = new Date();
   const cooldownMs = getEmailOtpResendCooldownMs();
   const lastSentAt = user.emailVerificationSentAt instanceof Date ? user.emailVerificationSentAt : null;
   if (lastSentAt && now.getTime() - lastSentAt.getTime() < cooldownMs) {
-    return { ok: true, mail: { sent: false, skipped: true, reason: "COOLDOWN" } };
+    return { ok: true };
   }
 
   const ttlMs = getEmailOtpTtlMs();
@@ -462,11 +460,12 @@ export async function issueEmailVerificationOtp({ user, ip, userAgent, requestId
   await user.save();
 
   try {
-    const mail = await sendEmailOtp({ to: user.emailLower, code, requestId });
-    return { ok: true, mail: mail || { sent: false, skipped: true, reason: "UNKNOWN" } };
+    await sendEmailOtp({ to: user.emailLower, code, requestId });
   } catch {
-    return { ok: true, mail: { sent: false, skipped: false, reason: "SEND_ERROR" } };
+    // swallow
   }
+
+  return { ok: true };
 }
 
 export async function verifyEmailOtp({ email, code, ip, userAgent }) {
@@ -525,16 +524,13 @@ export async function verifyEmailOtp({ email, code, ip, userAgent }) {
 
 export async function resendEmailOtp({ email, ip, userAgent, requestId }) {
   const { emailLower } = normalizeEmail(email);
-  if (!emailLower) {
-    return { ok: true, mail: { sent: false, skipped: true, reason: "EMAIL_REQUIRED" } };
-  }
+  if (!emailLower) return { ok: true };
 
   const user = await User.findOne({ emailLower }).select(
     "emailLower isActive emailVerified emailVerificationSentAt",
   );
-  if (!user || !user.isActive || user.emailVerified) {
-    return { ok: true, mail: { sent: false, skipped: true, reason: "USER_INACTIVE_OR_VERIFIED" } };
-  }
+  if (!user || !user.isActive || user.emailVerified) return { ok: true };
 
-  return issueEmailVerificationOtp({ user, ip, userAgent, requestId });
+  await issueEmailVerificationOtp({ user, ip, userAgent, requestId });
+  return { ok: true };
 }

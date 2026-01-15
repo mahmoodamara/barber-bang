@@ -3,17 +3,10 @@ import { ENV } from "../utils/env.js";
 import { Order } from "../models/Order.js";
 import { User } from "../models/User.js";
 
-const smtpPort = Number(ENV.SMTP_PORT || 587);
-
-function getFrom() {
-  return ENV.MAIL_FROM || ENV.SMTP_FROM || ENV.SMTP_USER || "no-reply@example.com";
-}
-
 const transporter = nodemailer.createTransport({
   host: ENV.SMTP_HOST,
-  port: smtpPort,
-  secure: ENV.SMTP_SECURE ?? smtpPort === 465,
-  name: ENV.SMTP_NAME || undefined,
+  port: Number(ENV.SMTP_PORT || 587),
+  secure: Number(ENV.SMTP_PORT || 587) === 465,
   auth: ENV.SMTP_USER && ENV.SMTP_PASS ? { user: ENV.SMTP_USER, pass: ENV.SMTP_PASS } : undefined,
 
   pool: true,
@@ -62,7 +55,7 @@ export async function sendInvoiceEmail(arg1, arg2, arg3) {
   }
 
   await transporter.sendMail({
-    from: getFrom(),
+    from: ENV.SMTP_FROM,
     to,
     subject: "Your Invoice",
     text: `Invoice for order ${orderId}`,
@@ -103,9 +96,8 @@ export async function sendInvoiceEmailForOrder({ orderId, pdfBuffer }) {
  * - Requires SMTP + ALERT_EMAIL_TO
  * - Safe no-op if not configured.
  */
-export async function sendOpsEmail({ to, subject, text, meta } = {}) {
-  const recipient = to || ENV.ALERT_EMAIL_TO;
-  if (!ENV.SMTP_HOST || !getFrom() || !recipient) {
+export async function sendOpsEmail({ subject, text, meta } = {}) {
+  if (!ENV.SMTP_HOST || !ENV.SMTP_FROM || !ENV.ALERT_EMAIL_TO) {
     return { sent: false, skipped: true, reason: "SMTP_OR_ALERT_EMAIL_NOT_CONFIGURED" };
   }
 
@@ -115,8 +107,8 @@ export async function sendOpsEmail({ to, subject, text, meta } = {}) {
   ].join("");
 
   await transporter.sendMail({
-    from: getFrom(),
-    to: recipient,
+    from: ENV.SMTP_FROM,
+    to: ENV.ALERT_EMAIL_TO,
     subject: subject || "Ops Alert",
     text: body,
   });

@@ -5,7 +5,6 @@ import { validate } from "../../middlewares/validate.js";
 import { requireAuth } from "../../middlewares/auth.js";
 
 import { endpointLimiterMongo } from "../../middlewares/endpointLimiterMongo.js";
-import { idempotencyEnforce } from "../../middlewares/idempotencyEnforce.js";
 
 import {
   getMyWishlist,
@@ -32,7 +31,6 @@ router.post(
   "/items",
   endpointLimiterMongo({ scope: "wishlist:add", windowMs: 60_000, max: 60, messageCode: "WISHLIST_RATE_LIMIT" }),
   validate(addWishlistItemSchema),
-  idempotencyEnforce({ routeName: "wishlist:add", required: false }),
   asyncHandler(addWishlist),
 );
 

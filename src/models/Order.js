@@ -259,15 +259,6 @@ const PromotionSnapshotSchema = new Schema(
   { _id: false },
 );
 
-const PickupLocationSnapshotSchema = new Schema(
-  {
-    name: { type: String, trim: true, maxlength: 120, default: "" },
-    address: { type: String, trim: true, maxlength: 200, default: "" },
-    notes: { type: String, trim: true, maxlength: 300, default: "" },
-  },
-  { _id: false },
-);
-
 // Phase 11 snapshot (added safely; optional, default null)
 const ShippingMethodSnapshotSchema = new Schema(
   {
@@ -296,7 +287,6 @@ const ShippingMethodSnapshotSchema = new Schema(
       default: 0,
       validate: { validator: intMin0, message: "shippingMethod.computedPrice must be integer >= 0" },
     },
-    pickupLocation: { type: PickupLocationSnapshotSchema, default: null },
   },
   { _id: false },
 );
@@ -304,7 +294,6 @@ const ShippingMethodSnapshotSchema = new Schema(
 const ORDER_STATUSES = [
   "draft",
   "pending_payment",
-  "cod_pending_approval",
   "payment_received",
   "stock_confirmed",
   "paid", // legacy (treated as confirmed)
@@ -640,17 +629,6 @@ OrderSchema.pre("validate", function preValidate(next) {
     }
     if (this.stock.status !== "reserved") {
       this.invalidate("stock.status", "pending_payment requires stock.status=reserved");
-    }
-  }
-
-  if (statusChanged && this.status === "cod_pending_approval") {
-    this.stock = this.stock || {};
-    if (!this.stock.status) {
-      this.stock.status = "reserved";
-      this.stock.reservedAt = this.stock.reservedAt || new Date();
-    }
-    if (this.stock.status !== "reserved") {
-      this.invalidate("stock.status", "cod_pending_approval requires stock.status=reserved");
     }
   }
 

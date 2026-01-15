@@ -115,9 +115,7 @@ function buildTooManyRequests(res, req, resetAt) {
       code: "RATE_LIMITED",
       message: "Too many requests",
       requestId: req.requestId,
-      details: {
-        retryAfterSeconds: retryAfter,
-      },
+      retryAfterSec: retryAfter,
     },
   });
 }
@@ -158,7 +156,6 @@ function createLimiter({ keyPrefix, includeEmail }) {
 
 export const authRegisterLimiter = createLimiter({ keyPrefix: "register", includeEmail: false });
 export const authLoginLimiter = createLimiter({ keyPrefix: "login", includeEmail: true });
-export const authRefreshLimiter = createLimiter({ keyPrefix: "refresh", includeEmail: false });
 export const authForgotPasswordLimiter = createLimiter({ keyPrefix: "forgot", includeEmail: true });
 export const authVerifyOtpLimiter = createLimiter({ keyPrefix: "verify-otp", includeEmail: true });
 export const authResendOtpLimiter = createLimiter({ keyPrefix: "resend-otp", includeEmail: true });

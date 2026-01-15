@@ -11,8 +11,6 @@ import { idempotencyEnforce } from "../../middlewares/idempotencyEnforce.js";
 
 import {
   adminAddOrderNoteSchema,
-  adminCodAcceptSchema,
-  adminCodRejectSchema,
   adminListOrdersQuerySchema,
   adminOrderIdParamsSchema,
   adminResolvePaymentSchema,
@@ -21,8 +19,6 @@ import {
 } from "../../validators/adminOrders.validators.js";
 
 import {
-  adminCodAccept,
-  adminCodReject,
   adminGetOrder,
   adminListOrders,
   adminAddOrderNote,
@@ -151,30 +147,6 @@ router.post(
   useValidatedBodyForIdempotency,
   idempotencyEnforce({ routeName: "admin:refund", required: true }),
   asyncHandler(adminRefund),
-);
-
-// COD Accept: permission-gated
-router.post(
-  "/:id/cod/accept",
-  requireAdminOrStaff,
-  requirePermissionAny(["orders.cod.approve"]),
-  adminLimit("admin:orders:cod_accept", { max: 60 }),
-  validate(adminCodAcceptSchema),
-  useValidatedBodyForIdempotency,
-  idempotencyEnforce({ routeName: "admin:orders:cod_accept", required: true }),
-  asyncHandler(adminCodAccept),
-);
-
-// COD Reject: permission-gated
-router.post(
-  "/:id/cod/reject",
-  requireAdminOrStaff,
-  requirePermissionAny(["orders.cod.approve"]),
-  adminLimit("admin:orders:cod_reject", { max: 60 }),
-  validate(adminCodRejectSchema),
-  useValidatedBodyForIdempotency,
-  idempotencyEnforce({ routeName: "admin:orders:cod_reject", required: true }),
-  asyncHandler(adminCodReject),
 );
 
 export default router;

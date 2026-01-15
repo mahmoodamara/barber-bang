@@ -64,16 +64,7 @@ export const orderIdSchema = z.object({
   }),
 });
 
-export const checkoutSchema = z.object({
-  params: z.object({
-    id: objectId,
-  }),
-  body: z
-    .object({
-      provider: z.enum(["stripe", "cod"]).optional(),
-    })
-    .optional(),
-});
+export const checkoutSchema = orderIdSchema;
 
 export const orderQuoteSchema = z.object({
   params: z.object({

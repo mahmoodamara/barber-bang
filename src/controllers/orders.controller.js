@@ -1,6 +1,6 @@
 import { Order } from "../models/Order.js";
 import { createDraftOrder } from "../services/orderDraft.service.js"; // Phase 3
-import { startCheckout, startCodCheckout } from "../services/payment.service.js";
+import { startCheckout } from "../services/payment.service.js";
 import { cancelOrderByUser } from "../services/cancel.service.js";
 import { formatOrderForResponse } from "../utils/orderResponse.js";
 import { parsePagination } from "../utils/paginate.js";
@@ -39,18 +39,11 @@ export async function createOrder(req, res) {
 
 export async function createCheckout(req, res) {
   try {
-    const provider = req.validated?.body?.provider ?? "stripe";
-    const url =
-      provider === "cod"
-        ? await startCodCheckout({
-            orderId: req.params.id,
-            userId: req.auth.userId,
-          })
-        : await startCheckout({
-            req,
-            orderId: req.params.id,
-            userId: req.auth.userId,
-          });
+    const url = await startCheckout({
+      req,
+      orderId: req.params.id,
+      userId: req.auth.userId,
+    });
 
     await logAuditSuccess(req, AuditActions.ORDER_CHECKOUT_START, {
       type: "Order",

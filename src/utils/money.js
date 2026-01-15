@@ -102,67 +102,6 @@ function isPlainObject(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
-const MONEY_MAJOR_FIELDS = new Set([
-  "amount",
-  "amountCaptured",
-  "amountRefunded",
-  "basePrice",
-  "basePriceSnapshot",
-  "computedPrice",
-  "coupon",
-  "discountTotal",
-  "freeAbove",
-  "freeAboveSnapshot",
-  "grandTotal",
-  "lineTotal",
-  "maxSubtotal",
-  "minSubtotal",
-  "payableSubtotal",
-  "price",
-  "priceFrom",
-  "promotions",
-  "shipping",
-  "subtotal",
-  "tax",
-  "unitPrice",
-]);
-
-export function ensureMoneyTwinsOnResponse(payload) {
-  const seen = new WeakSet();
-
-  const walk = (value, currencyHint) => {
-    if (value === null || value === undefined) return;
-
-    if (Array.isArray(value)) {
-      for (let i = 0; i < value.length; i += 1) {
-        walk(value[i], currencyHint);
-      }
-      return;
-    }
-
-    if (!isPlainObject(value)) return;
-    if (seen.has(value)) return;
-    seen.add(value);
-
-    const localCurrency = normalizeCurrency(value.currency || currencyHint || "ILS") || "ILS";
-
-    for (const [key, val] of Object.entries(value)) {
-      if (MONEY_MAJOR_FIELDS.has(key) && !Object.prototype.hasOwnProperty.call(value, `${key}Minor`)) {
-        if (val === null || val === undefined) {
-          value[`${key}Minor`] = null;
-        } else if (localCurrency && (typeof val === "number" || typeof val === "string")) {
-          value[`${key}Minor`] = toMinorUnitsInt(val, localCurrency);
-        }
-      }
-
-      walk(val, localCurrency);
-    }
-  };
-
-  walk(payload, null);
-  return payload;
-}
-
 export function assertMoneyContractOnResponse(payload) {
   const seen = new WeakSet();
 

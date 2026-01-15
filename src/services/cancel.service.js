@@ -44,7 +44,7 @@ export async function cancelOrderByUser({ orderId, userId, reason }) {
       throw err;
     }
 
-    if (order.status !== "pending_payment" && order.status !== "cod_pending_approval") {
+    if (order.status !== "pending_payment") {
       const err = new Error("ORDER_CANCEL_NOT_ALLOWED");
       err.statusCode = 409;
       throw err;

@@ -61,14 +61,6 @@ const citiesSchema = z
     }
   });
 
-const pickupLocationSchema = z
-  .object({
-    name: trimmed(1, 120),
-    address: trimmed(1, 200),
-    notes: trimmed(0, 300).optional().default(""),
-  })
-  .strict();
-
 /* ---------------------------- */
 /* Public/user list methods      */
 /* ---------------------------- */
@@ -93,21 +85,9 @@ export const setOrderShippingMethodSchema = z.object({
   params: z.object({
     id: objectId, // orderId (match route: /orders/:id/shipping-method for example)
   }),
-  body: z
-    .object({
-      shippingMethodId: objectId,
-      shippingMethodCode: codeSchema.optional(),
-      pickupLocation: pickupLocationSchema.optional(),
-    })
-    .superRefine((b, ctx) => {
-      if (b.shippingMethodCode === "SELF_PICKUP" && !b.pickupLocation) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["pickupLocation"],
-          message: "PICKUP_LOCATION_REQUIRED",
-        });
-      }
-    }),
+  body: z.object({
+    shippingMethodId: objectId,
+  }),
 });
 
 /* ---------------------------- */

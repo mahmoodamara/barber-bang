@@ -14,7 +14,6 @@ import { repriceOrder } from "./reprice.service.js";
 import { enqueueOrderNotification } from "./notification.service.js";
 
 const stripe = new Stripe(ENV.STRIPE_SECRET_KEY);
-const SELF_PICKUP_CODE = "SELF_PICKUP";
 
 function computeOrderAmounts(order) {
   let subtotal = 0;
@@ -61,104 +60,6 @@ function orderCurrency(order) {
     normalizeCurrency(ENV.STRIPE_CURRENCY) ||
     "ILS"
   );
-}
-
-function isSelfPickup(order) {
-  return String(order?.shippingMethod?.code || "").toUpperCase() === SELF_PICKUP_CODE;
-}
-
-function hasPickupLocation(order) {
-  const loc = order?.shippingMethod?.pickupLocation;
-  if (!loc || typeof loc !== "object") return false;
-  const name = String(loc.name || "").trim();
-  const address = String(loc.address || "").trim();
-  return !!(name && address);
-}
-
-export async function startCodCheckout({ orderId, userId }) {
-  let order = await applyQueryBudget(Order.findOne({ _id: orderId, userId }));
-  if (!order) {
-    const err = new Error("ORDER_NOT_FOUND");
-    err.statusCode = 404;
-    throw err;
-  }
-
-  if (order.status !== "pending_payment") {
-    const err = new Error("ORDER_NOT_PAYABLE");
-    err.statusCode = 409;
-    throw err;
-  }
-
-  const stockStatus = order.stock?.status;
-  if (stockStatus && stockStatus !== "reserved") {
-    const err = new Error("STOCK_NOT_RESERVED");
-    err.statusCode = 409;
-    throw err;
-  }
-
-  if (!isSelfPickup(order)) {
-    const err = new Error("ORDER_NOT_ELIGIBLE");
-    err.statusCode = 409;
-    err.details = { reason: "SELF_PICKUP_REQUIRED" };
-    throw err;
-  }
-
-  if (!hasPickupLocation(order)) {
-    const err = new Error("PICKUP_LOCATION_REQUIRED");
-    err.statusCode = 400;
-    throw err;
-  }
-
-  // Optional: reject if already expired
-  if (order.expiresAt && new Date(order.expiresAt).getTime() <= Date.now()) {
-    const err = new Error("ORDER_EXPIRED");
-    err.statusCode = 409;
-    throw err;
-  }
-
-  // Anti-abuse: check max open COD orders per user
-  const maxOpenCod = Number(ENV.COD_MAX_OPEN_ORDERS_PER_USER || 3);
-  const openCodCount = await Order.countDocuments({
-    userId,
-    status: { $in: ["cod_pending_approval", "pending_payment"] },
-    "payment.provider": "cod",
-    _id: { $ne: orderId },
-  });
-  if (openCodCount >= maxOpenCod) {
-    const err = new Error("COD_MAX_OPEN_ORDERS_EXCEEDED");
-    err.statusCode = 400;
-    err.code = "COD_MAX_OPEN_ORDERS_EXCEEDED";
-    err.details = { max: maxOpenCod, current: openCodCount };
-    throw err;
-  }
-
-  await repriceOrder(order._id);
-  order = await applyQueryBudget(Order.findOne({ _id: orderId, userId }));
-  if (!order) {
-    const err = new Error("ORDER_NOT_FOUND");
-    err.statusCode = 404;
-    throw err;
-  }
-
-  const currency = orderCurrency(order);
-  const { grandTotal } = computeOrderAmounts(order);
-  order.payment = order.payment || {};
-  order.payment.provider = "cod";
-  order.payment.status = "pending";
-  order.payment.checkoutAmount = grandTotal;
-  order.payment.checkoutCurrency = currency;
-
-  // Set COD pending approval status and short TTL
-  const codApprovalTtlMinutes = Number(ENV.COD_APPROVAL_TTL_MINUTES || 60);
-  assertOrderTransition(order.status, ORDER_STATUS.COD_PENDING_APPROVAL);
-  order.status = ORDER_STATUS.COD_PENDING_APPROVAL;
-  order.expiresAt = new Date(Date.now() + codApprovalTtlMinutes * 60_000);
-  order.statusHistory = order.statusHistory || [];
-  order.statusHistory.push({ status: "cod_pending_approval", at: new Date(), note: "cod:checkout_started" });
-
-  await order.save();
-
-  return `${ENV.FRONTEND_URL}/success?order=${order.id}`;
 }
 
 /**
@@ -739,7 +640,7 @@ export async function cancelStaleDraftOrders({ limit = 50 } = {}) {
 
 /**
  * Phase 4 compatible cancel sweep:
- * - cancels pending_payment and cod_pending_approval orders past expiresAt
+ * - cancels pending_payment orders past expiresAt
  * - releases reserved stock in BULK
  * - sets cancel.* fields (not legacy canceledAt/cancelReason)
  * - best-effort expire stripe session to reduce late payments
@@ -749,8 +650,8 @@ export async function cancelExpiredOrders({ limit = 50 } = {}) {
 
   const orders = await applyQueryBudget(
     Order.find(
-      { status: { $in: ["pending_payment", "cod_pending_approval"] }, expiresAt: { $lte: now } },
-      { _id: 1, items: 1, "payment.stripeSessionId": 1, status: 1 },
+      { status: "pending_payment", expiresAt: { $lte: now } },
+      { _id: 1, items: 1, "payment.stripeSessionId": 1 },
     )
       .sort({ expiresAt: 1 })
       .limit(Math.max(1, Math.min(500, Number(limit) || 50)))
@@ -762,10 +663,10 @@ export async function cancelExpiredOrders({ limit = 50 } = {}) {
     try {
       updated = await cancelOrderAndRelease({
         orderId: o._id,
-        expectedStatus: o.status,
+        expectedStatus: "pending_payment",
         reason: "expired",
         canceledBy: "system",
-        note: `system:expired:${o.status}`,
+        note: "system:expired",
       });
     } catch {
       // best-effort; do not crash sweep

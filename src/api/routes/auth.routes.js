@@ -5,7 +5,6 @@ import { validate } from "../../middlewares/validate.js";
 import {
   authForgotPasswordLimiter,
   authLoginLimiter,
-  authRefreshLimiter,
   authRegisterLimiter,
   authResendOtpLimiter,
   authVerifyOtpLimiter,
@@ -29,7 +28,7 @@ const router = Router();
 
 router.post("/register", authRegisterLimiter, validate(authSchemas.register), asyncHandler(register));
 router.post("/login", authLoginLimiter, validate(authSchemas.login), asyncHandler(login));
-router.post("/refresh", authRefreshLimiter, validate(authSchemas.refresh), asyncHandler(refresh));
+router.post("/refresh", validate(authSchemas.refresh), asyncHandler(refresh));
 router.post("/logout", validate(authSchemas.logout), asyncHandler(logout));
 router.post("/logout-all", requireAuth, validate(authSchemas.logoutAll), asyncHandler(logoutAll));
 router.post(

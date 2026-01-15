@@ -101,28 +101,7 @@ export const adminResolvePaymentSchema = z
     params: z.object({ id: objectId }).strict(),
     body: z
       .object({
-        action: z.enum(["retry_stock_confirm", "mark_requires_refund", "mark_cod_paid"]),
-        note: z.string().trim().max(500).optional(),
-      })
-      .strict(),
-  });
-
-export const adminCodAcceptSchema = z
-  .object({
-    params: z.object({ id: objectId }).strict(),
-    body: z
-      .object({
-        note: z.string().trim().max(500).optional(),
-      })
-      .strict(),
-  });
-
-export const adminCodRejectSchema = z
-  .object({
-    params: z.object({ id: objectId }).strict(),
-    body: z
-      .object({
-        reason: z.string().trim().max(300).optional(),
+        action: z.enum(["retry_stock_confirm", "mark_requires_refund"]),
         note: z.string().trim().max(500).optional(),
       })
       .strict(),

@@ -7,8 +7,6 @@ import { formatOrderForResponse } from "../utils/orderResponse.js";
 import { withRequiredTransaction } from "../utils/mongoTx.js";
 import { repriceOrder } from "./reprice.service.js";
 
-const SELF_PICKUP_CODE = "SELF_PICKUP";
-
 function httpError(statusCode, code, message, details) {
   const err = new Error(message || code);
   err.statusCode = statusCode;
@@ -57,22 +55,6 @@ function normalizeCities(arr) {
   return Array.from(set).slice(0, 500);
 }
 
-function s(v, max) {
-  const raw = v === null || v === undefined ? "" : String(v);
-  const trimmed = raw.trim();
-  if (!trimmed) return "";
-  return trimmed.length > max ? trimmed.slice(0, max) : trimmed;
-}
-
-function normalizePickupLocation(input) {
-  if (!input || typeof input !== "object") return null;
-  const name = s(input.name, 120);
-  const address = s(input.address, 200);
-  const notes = s(input.notes, 300);
-  if (!name || !address) return null;
-  return { name, address, notes: notes || "" };
-}
-
 function matchCity(method, city) {
   const list = Array.isArray(method.cities) ? method.cities : [];
   if (!list.length) return true;
@@ -95,7 +77,6 @@ function isEligible(method, payableSubtotal, city) {
 }
 
 function computeShippingPrice(method, payableSubtotal) {
-  if (String(method?.code || "").toUpperCase() === SELF_PICKUP_CODE) return 0;
   const freeAbove = normalizeNullableMinor(method.freeAbove, "freeAbove");
   if (freeAbove !== null && payableSubtotal >= freeAbove) return 0;
   return normalizeNullableMinor(method.basePrice, "basePrice") || 0;
@@ -180,7 +161,6 @@ export async function setOrderShippingMethod({
   orderId,
   auth,
   shippingMethodId,
-  pickupLocation,
   lang: _lang = "he",
   options = {},
 }) {
@@ -191,7 +171,6 @@ export async function setOrderShippingMethod({
         orderId,
         auth,
         shippingMethodId,
-        pickupLocation,
         lang: _lang,
         options: { ...(options || {}), session: s },
       });
@@ -225,12 +204,6 @@ export async function setOrderShippingMethod({
     });
   }
 
-  const isSelfPickup = String(method.code || "").toUpperCase() === SELF_PICKUP_CODE;
-  const pickupSnapshot = normalizePickupLocation(pickupLocation);
-  if (isSelfPickup && !pickupSnapshot) {
-    throw httpError(400, "PICKUP_LOCATION_REQUIRED", "Pickup location is required");
-  }
-
   const computedPrice = computeShippingPrice(method, payableSubtotal);
 
   order.shippingMethod = {
@@ -241,7 +214,6 @@ export async function setOrderShippingMethod({
     basePriceSnapshot: normalizeNullableMinor(method.basePrice, "basePrice"),
     freeAboveSnapshot: normalizeNullableMinor(method.freeAbove, "freeAbove"),
     computedPrice,
-    pickupLocation: isSelfPickup ? pickupSnapshot : null,
   };
 
   order.pricing = order.pricing || {};
