@@ -1,40 +1,40 @@
 import mongoose from "mongoose";
-import { baseToJSON, getOrCreateModel } from "./_helpers.js";
 
-const { Schema } = mongoose;
-
-const CouponSchema = new Schema(
+const couponSchema = new mongoose.Schema(
   {
-    code: { type: String, trim: true, uppercase: true, maxlength: 60, required: true },
-
+    code: { type: String, required: true, unique: true, uppercase: true, trim: true },
     type: { type: String, enum: ["percent", "fixed"], required: true },
     value: { type: Number, required: true, min: 0 },
 
-    currency: { type: String, trim: true, uppercase: true, default: "ILS", maxlength: 10 },
     minOrderTotal: { type: Number, default: 0, min: 0 },
+    maxDiscount: { type: Number, default: null, min: 0 },
 
-    maxUsesTotal: { type: Number, default: null, min: 1 },
-    usesTotal: { type: Number, default: 0, min: 0 },
+    usageLimit: { type: Number, default: null, min: 1 },
+    usedCount: { type: Number, default: 0, min: 0 },
+    reservedCount: { type: Number, default: 0, min: 0 },
 
-    maxUsesPerUser: { type: Number, default: null, min: 0 },
-    allowedUserIds: { type: [Schema.Types.ObjectId], ref: "User", default: [], index: true },
-    allowedRoles: { type: [String], default: [] },
+    // Track which orders used this coupon (for idempotent atomic consumption)
+    usedByOrders: {
+      type: [{ type: mongoose.Schema.Types.ObjectId, ref: "Order" }],
+      default: [],
+    },
 
-    startsAt: { type: Date, default: null },
-    endsAt: { type: Date, default: null },
+    // Track which orders reserved this coupon (short-lived)
+    reservedByOrders: {
+      type: [{ type: mongoose.Schema.Types.ObjectId, ref: "Order" }],
+      default: [],
+    },
 
-    isActive: { type: Boolean, default: true, index: true },
+    startAt: { type: Date, default: null },
+    endAt: { type: Date, default: null },
+
+    isActive: { type: Boolean, default: true },
   },
-  { timestamps: true, strict: true },
+  { timestamps: true },
 );
 
-CouponSchema.index({ code: 1 }, { unique: true });
-CouponSchema.index({ code: 1, isActive: 1 });
-CouponSchema.index({ isActive: 1, endsAt: 1 });
-CouponSchema.index({ isActive: 1, startsAt: 1, endsAt: 1 });
-CouponSchema.index({ createdAt: -1 });
+// Index for atomic consumption checks (code is already unique via schema)
+couponSchema.index({ code: 1, usedByOrders: 1 });
+couponSchema.index({ code: 1, reservedByOrders: 1 });
 
-baseToJSON(CouponSchema);
-
-export const Coupon = getOrCreateModel("Coupon", CouponSchema);
-export default Coupon;
+export const Coupon = mongoose.model("Coupon", couponSchema);

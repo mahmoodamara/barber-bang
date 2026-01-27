@@ -1,53 +1,90 @@
 // src/models/Review.js
 import mongoose from "mongoose";
-import { baseToJSON, getOrCreateModel } from "./_helpers.js";
 
-const { Schema, Types } = mongoose;
-
-const REVIEW_STATUSES = Object.freeze(["pending", "approved", "rejected", "deleted"]);
-
-const ReviewSchema = new Schema(
+const reviewSchema = new mongoose.Schema(
   {
-    productId: { type: Types.ObjectId, ref: "Product", required: true, index: true },
-    userId: { type: Types.ObjectId, ref: "User", required: true },
+    productId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Product",
+      required: true,
+      index: true,
+    },
 
-    rating: { type: Number, required: true, min: 1, max: 5 },
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      index: true,
+    },
 
-    title: { type: String, trim: true, maxlength: 80, default: "" },
-    body: { type: String, trim: true, maxlength: 2000, default: "" },
+    // ✅ Additive snapshot (optional, helps UI without populate)
+    userName: {
+      type: String,
+      default: "",
+      trim: true,
+      maxlength: 80,
+    },
 
-    // لغة نص المراجعة (مهم لـ UI)
-    lang: { type: String, enum: ["he", "ar"], default: "he", index: true },
+    rating: {
+      type: Number,
+      required: true,
+      min: 1,
+      max: 5,
+      validate: {
+        validator: Number.isInteger,
+        message: "rating must be an integer between 1 and 5",
+      },
+    },
 
-    status: { type: String, enum: REVIEW_STATUSES, default: "pending", index: true },
-    isDeleted: { type: Boolean, default: false, index: true },
-    deletedAt: { type: Date, default: null },
+    comment: {
+      type: String,
+      default: "",
+      trim: true,
+      maxlength: 600,
+    },
 
-    // Verified purchase enforcement
-    verifiedPurchase: { type: Boolean, default: false, index: true },
+    // ✅ Soft moderation / hide reviews without deleting
+    isHidden: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
 
-    isFeatured: { type: Boolean, default: false, index: true },
-    verifiedOrderId: { type: Types.ObjectId, ref: "Order", default: null },
-    verifiedAt: { type: Date, default: null },
+    moderationStatus: {
+      type: String,
+      enum: ["approved", "pending", "rejected"],
+      default: "approved",
+      index: true,
+    },
 
-    moderation: {
-      moderatedAt: { type: Date, default: null },
-      moderatedBy: { type: Types.ObjectId, ref: "User", default: null },
-      reason: { type: String, trim: true, maxlength: 300, default: "" },
+    moderationNote: {
+      type: String,
+      trim: true,
+      maxlength: 500,
+    },
+
+    moderatedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+
+    moderatedAt: {
+      type: Date,
+    },
+
+    isActive: { // Keeping for backward compatibility if needed, but isHidden is preferred for moderation
+      type: Boolean,
+      default: true,
+      index: true,
     },
   },
-  { timestamps: true, strict: true },
+  { timestamps: true },
 );
 
-// واحد review لكل (user, product)
-// أداء listing للـ public
-ReviewSchema.index({ productId: 1, status: 1, createdAt: -1 });
-ReviewSchema.index({ productId: 1, status: 1, rating: -1, createdAt: -1 });
-ReviewSchema.index({ userId: 1, createdAt: -1 });
-ReviewSchema.index({ productId: 1, userId: 1 }, { unique: true });
+// ✅ Prevent multiple reviews per user per product
+reviewSchema.index({ productId: 1, userId: 1 }, { unique: true });
 
+// ✅ Useful listing index
+reviewSchema.index({ productId: 1, isActive: 1, createdAt: -1 });
 
-baseToJSON(ReviewSchema);
-
-export const Review = getOrCreateModel("Review", ReviewSchema);
-export default Review;
+export const Review = mongoose.model("Review", reviewSchema);

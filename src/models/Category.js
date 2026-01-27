@@ -1,43 +1,81 @@
 import mongoose from "mongoose";
-import { baseToJSON, getOrCreateModel } from "./_helpers.js";
 
-const { Schema, Types } = mongoose;
+import { generateUniqueSlug, slugifyText } from "../utils/slug.js";
 
-// slug: hair-clippers
-const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-// fullSlug: tools/hair-clippers
-const FULL_SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*(?:\/[a-z0-9]+(?:-[a-z0-9]+)*)*$/;
-
-const CategorySchema = new Schema(
+const categorySchema = new mongoose.Schema(
   {
-    nameHe: { type: String, trim: true, maxlength: 140, required: true },
-    nameAr: { type: String, trim: true, maxlength: 140 },
+    // Bilingual fields (default language: Hebrew)
+    nameHe: { type: String, required: true, unique: true, trim: true, minlength: 2, maxlength: 80 },
+    nameAr: { type: String, default: "", trim: true, minlength: 0, maxlength: 80 },
 
-    slug: { type: String, trim: true, maxlength: 160, required: true, match: SLUG_RE },
-    fullSlug: { type: String, trim: true, maxlength: 400, required: true, match: FULL_SLUG_RE },
+    // Backward compatible legacy field (optional)
+    name: { type: String, default: "", trim: true },
 
-    image: { type: String, trim: true, maxlength: 800, default: "" }, // optional URL
+    // URL-safe slug for SEO routing.
+    // Default undefined (NOT "") so sparse unique index works correctly.
+    // Auto-generated in pre-validate hook when missing.
+    slug: { type: String, default: undefined, trim: true, lowercase: true },
 
-    parentId: { type: Types.ObjectId, ref: "Category", default: null, index: true },
-    ancestors: { type: [Types.ObjectId], ref: "Category", default: [], index: true },
-    level: { type: Number, default: 0, min: 0, index: true },
+    imageUrl: { type: String, default: "", trim: true },
 
+    // Visibility + ordering
+    isActive: { type: Boolean, default: true },
     sortOrder: { type: Number, default: 0 },
-    isActive: { type: Boolean, default: true, index: true },
-    isDeleted: { type: Boolean, default: false, index: true },
-    deletedAt: { type: Date, default: null },
+
+    // Descriptions (bilingual)
+    descriptionHe: { type: String, default: "", trim: true, maxlength: 500 },
+    descriptionAr: { type: String, default: "", trim: true, maxlength: 500 },
+
+    // SEO meta (bilingual)
+    metaTitleHe: { type: String, default: "", trim: true, maxlength: 70 },
+    metaTitleAr: { type: String, default: "", trim: true, maxlength: 70 },
+    metaDescriptionHe: { type: String, default: "", trim: true, maxlength: 160 },
+    metaDescriptionAr: { type: String, default: "", trim: true, maxlength: 160 },
   },
-  { timestamps: true, strict: true },
+  { timestamps: true },
 );
 
-const NOT_DELETED = { isDeleted: { $ne: true } };
+/**
+ * Pre-validate hook: auto-generate slug when missing or empty.
+ * Uses nameHe as base input, falls back to name or _id.
+ */
+categorySchema.pre("validate", async function categoryPreValidate(next) {
+  try {
+    // Normalize slug: trim + lowercase
+    if (typeof this.slug === "string") {
+      this.slug = this.slug.trim().toLowerCase();
+    }
 
-CategorySchema.index({ fullSlug: 1 }, { unique: true, partialFilterExpression: NOT_DELETED });
-CategorySchema.index({ parentId: 1, sortOrder: 1 }, { partialFilterExpression: NOT_DELETED });
-CategorySchema.index({ isActive: 1, parentId: 1, sortOrder: 1 }, { partialFilterExpression: NOT_DELETED });
-CategorySchema.index({ createdAt: -1 }, { partialFilterExpression: NOT_DELETED });
+    // Auto-generate slug if missing or empty
+    if (!this.slug) {
+      const baseInput = this.nameHe || this.name || this._id?.toString() || Date.now().toString();
+      this.slug = await generateUniqueSlug(this.constructor, baseInput, this._id);
+    }
 
-baseToJSON(CategorySchema);
+    // Re-check uniqueness if slug was modified (not auto-generated above)
+    if (this.isModified("slug") && this.slug) {
+      const existing = await this.constructor.findOne({
+        slug: this.slug,
+        _id: { $ne: this._id },
+      });
+      if (existing) {
+        // Collision detected - generate unique suffix
+        this.slug = await generateUniqueSlug(this.constructor, this.slug, this._id);
+      }
+    }
 
-export const Category = getOrCreateModel("Category", CategorySchema);
-export default Category;
+    return next();
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// Useful for SEO/URL routing on storefronts
+// sparse: true means documents without slug field are not indexed
+// Since default is now undefined (not ""), sparse works correctly
+categorySchema.index({ slug: 1 }, { unique: true, sparse: true });
+
+// Active categories ordering
+categorySchema.index({ isActive: 1, sortOrder: 1 });
+
+export const Category = mongoose.model("Category", categorySchema);

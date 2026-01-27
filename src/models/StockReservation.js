@@ -1,46 +1,35 @@
+// src/models/StockReservation.js
 import mongoose from "mongoose";
-import { baseToJSON, getOrCreateModel } from "./_helpers.js";
 
-const { Schema, Types } = mongoose;
-
-function intMin1(v) {
-  return Number.isInteger(v) && v >= 1;
-}
-
-const StockReservationSchema = new Schema(
+const reservationItemSchema = new mongoose.Schema(
   {
-    orderId: { type: Types.ObjectId, ref: "Order", required: true, index: true },
-    variantId: { type: Types.ObjectId, ref: "Variant", required: true, index: true },
-    productId: { type: Types.ObjectId, ref: "Product", default: null, index: true },
-
-    quantity: {
-      type: Number,
-      required: true,
-      validate: { validator: intMin1, message: "quantity must be integer >= 1" },
-    },
-
-    status: {
-      type: String,
-      enum: ["reserved", "confirmed", "released"],
-      default: "reserved",
-      index: true,
-    },
-    reservedAt: { type: Date, default: Date.now },
-    confirmedAt: { type: Date, default: null },
-    releasedAt: { type: Date, default: null },
-
-    // Optional: reservation expiry for cleanup/reconciliation
-    expiresAt: { type: Date, default: null, index: true },
-    reason: { type: String, trim: true, maxlength: 200, default: "" },
+    productId: { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: true },
+    qty: { type: Number, required: true, min: 1, max: 999 },
+    variantId: { type: String, default: "" },
+    // ✅ Track if this is a gift item (for debugging/auditing)
+    isGift: { type: Boolean, default: false },
   },
-  { timestamps: true, strict: true },
+  { _id: false }
 );
 
-// Idempotent per-order/variant ownership
-StockReservationSchema.index({ orderId: 1, variantId: 1 }, { unique: true });
-StockReservationSchema.index({ status: 1, expiresAt: 1 });
+const stockReservationSchema = new mongoose.Schema(
+  {
+    orderId: { type: mongoose.Schema.Types.ObjectId, ref: "Order", required: true, unique: true },
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+    items: { type: [reservationItemSchema], required: true },
+    status: {
+      type: String,
+      enum: ["reserved", "confirmed", "released", "expired"],
+      default: "reserved",
+    },
+    expiresAt: { type: Date, default: null },
+  },
+  { timestamps: true }
+);
 
-baseToJSON(StockReservationSchema);
+// TTL index for automatic cleanup of expired reservations
+stockReservationSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+// Compound index for status queries
+stockReservationSchema.index({ status: 1, expiresAt: 1 });
 
-export const StockReservation = getOrCreateModel("StockReservation", StockReservationSchema);
-export default StockReservation;
+export const StockReservation = mongoose.model("StockReservation", stockReservationSchema);

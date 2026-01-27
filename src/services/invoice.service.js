@@ -1,130 +1,98 @@
-import puppeteer from "puppeteer-core";
-import { ENV } from "../utils/env.js";
-import { Order } from "../models/Order.js";
-import { toMajorUnits } from "../utils/money.js";
+// src/services/invoice.service.js
+import { getReceiptUrlByPaymentIntent } from "./stripe.service.js";
+import { computeAllocationRequirement } from "../utils/allocation.js";
 
-let browserPromise;
-let browserInstance;
-let activeJobs = 0;
-let jobsSinceLaunch = 0;
-let launchedAtMs = 0;
-let recyclePending = false;
-const waiters = [];
+function makeErr(statusCode, code, message) {
+  const err = new Error(message);
+  err.statusCode = statusCode;
+  err.code = code;
+  return err;
+}
 
-function limits() {
-  return {
-    maxConcurrency: Number(ENV.PDF_MAX_CONCURRENCY || 2),
-    recycleJobs: Number(ENV.PDF_BROWSER_RECYCLE_JOBS || 50),
-    maxAgeMs: Number(ENV.PDF_BROWSER_MAX_AGE_MS || 30 * 60 * 1000),
+function normalizeProvider(raw) {
+  const v = String(raw || "").trim().toLowerCase();
+  if (!v) return "";
+  const allowed = new Set(["none", "stripe", "manual", "icount", "greeninvoice", "other"]);
+  return allowed.has(v) ? v : "other";
+}
+
+function normalizeUrlBase(raw) {
+  const base = String(raw || "").trim();
+  if (!base) return "";
+  return base.replace(/\/+$/, "");
+}
+
+export function resolveInvoiceProvider(order) {
+  const envProvider = normalizeProvider(process.env.INVOICE_PROVIDER);
+  if (envProvider) return envProvider;
+
+  const method = String(order?.paymentMethod || "").trim().toLowerCase();
+  return method === "stripe" ? "stripe" : "manual";
+}
+
+export async function createInvoiceForOrder(order) {
+  if (!order || !order._id) {
+    throw makeErr(400, "ORDER_REQUIRED", "order is required to issue invoice");
+  }
+
+  const provider = resolveInvoiceProvider(order);
+  const docId = String(order._id);
+
+  if (provider === "none") {
+    throw makeErr(400, "INVOICE_DISABLED", "Invoice issuing is disabled");
+  }
+
+  const allocation = computeAllocationRequirement({ order, pricing: order?.pricing });
+  const allocationPayload = {
+    required: allocation.required,
+    status: allocation.status,
+    thresholdBeforeVat: allocation.thresholdBeforeVat,
+    requestedAt: null,
   };
-}
 
-async function acquireSlot() {
-  const { maxConcurrency } = limits();
-  if (activeJobs < maxConcurrency) {
-    activeJobs += 1;
-    return;
-  }
-  await new Promise((resolve) => waiters.push(resolve));
-  activeJobs += 1;
-}
+  if (provider === "stripe") {
+    let receiptUrl = String(order?.stripe?.receiptUrl || "");
 
-async function closeBrowser() {
-  if (browserInstance) {
-    await browserInstance.close().catch(() => {});
-  }
-  browserInstance = null;
-  browserPromise = null;
-  launchedAtMs = 0;
-  jobsSinceLaunch = 0;
-  recyclePending = false;
-}
-
-async function recycleIfNeeded() {
-  if (!browserInstance) return;
-  const { recycleJobs, maxAgeMs } = limits();
-  const tooManyJobs = recycleJobs > 0 && jobsSinceLaunch >= recycleJobs;
-  const tooOld = maxAgeMs > 0 && launchedAtMs && Date.now() - launchedAtMs >= maxAgeMs;
-  if (!tooManyJobs && !tooOld) return;
-
-  if (activeJobs > 0) {
-    recyclePending = true;
-    return;
-  }
-  await closeBrowser();
-}
-
-async function releaseSlot() {
-  activeJobs = Math.max(0, activeJobs - 1);
-  const next = waiters.shift();
-  if (next) next();
-  if (activeJobs === 0 && recyclePending) {
-    await recycleIfNeeded();
-  }
-}
-
-async function getBrowser() {
-  if (!browserPromise) {
-    const execPath = ENV.CHROME_EXECUTABLE_PATH || process.env.CHROME_EXECUTABLE_PATH;
-    if (!execPath) {
-      const err = new Error("CHROME_EXECUTABLE_PATH_REQUIRED");
-      err.statusCode = 500;
-      throw err;
+    if (!receiptUrl) {
+      const paymentIntentId = String(order?.stripe?.paymentIntentId || "");
+      if (paymentIntentId) {
+        receiptUrl = await getReceiptUrlByPaymentIntent(paymentIntentId);
+      }
     }
 
-    browserPromise = puppeteer
-      .launch({
-        executablePath: execPath,
-        headless: "new",
-      })
-      .then((b) => {
-        browserInstance = b;
-        launchedAtMs = Date.now();
-        jobsSinceLaunch = 0;
-        return b;
-      });
-  }
-  return browserPromise;
-}
+    if (!receiptUrl) {
+      throw makeErr(400, "STRIPE_RECEIPT_NOT_AVAILABLE", "Stripe receipt URL not available");
+    }
 
-export async function generateInvoicePdf(orderId) {
-  const order = await Order.findById(orderId).lean();
-  if (!order) {
-    const err = new Error("ORDER_NOT_FOUND");
-    err.statusCode = 404;
-    throw err;
+    return {
+      provider,
+      docId,
+      docType: "receipt_link",
+      number: "",
+      url: receiptUrl,
+      issuedAt: new Date(),
+      status: "issued",
+      error: "",
+      allocation: allocationPayload,
+    };
   }
 
-  const timeoutMs = Number(ENV.PDF_TIMEOUT_MS || 15000);
+  if (provider === "manual") {
+    const base = normalizeUrlBase(process.env.INVOICE_BASE_URL);
+    const url = base ? `${base}/${encodeURIComponent(docId)}` : "";
 
-  await acquireSlot();
-  const browser = await getBrowser();
-  const page = await browser.newPage();
-
-  try {
-    page.setDefaultTimeout(timeoutMs);
-
-    // Minimal safe HTML (لا تدخل user input خام هنا)
-    await page.setContent(
-      `<html><body style="font-family: Arial">
-        <h1>Invoice</h1>
-        <p>Order: ${String(order._id)}</p>
-        <p>Status: ${String(order.status)}</p>
-        <p>Total: ${String(toMajorUnits(order.pricing?.grandTotal ?? 0, order.pricing?.currency ?? "ILS"))} ${String(order.pricing?.currency ?? "")}</p>
-      </body></html>`,
-      { waitUntil: "domcontentloaded" },
-    );
-
-    const pdf = await page.pdf({
-      format: "A4",
-      printBackground: true,
-    });
-
-    jobsSinceLaunch += 1;
-    return pdf;
-  } finally {
-    await page.close().catch(() => {});
-    await releaseSlot();
-    await recycleIfNeeded();
+    return {
+      provider,
+      docId,
+      docType: "invoice",
+      number: "",
+      url,
+      issuedAt: url ? new Date() : null,
+      status: url ? "issued" : "pending",
+      error: "",
+      allocation: allocationPayload,
+    };
   }
+
+  throw makeErr(501, "INVOICE_PROVIDER_NOT_IMPLEMENTED", `Invoice provider "${provider}" not implemented`);
 }

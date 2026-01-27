@@ -1,16 +1,5 @@
+.env
 node_modules
 dist
 coverage
-*.log
-
-.env
-.env.*.local
-
 .DS_Store
-
-# IDE
-.vscode
-.idea
-
-# Docker
-docker/.env
