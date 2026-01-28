@@ -169,7 +169,15 @@ const localhostOrigins = new Set([
   "http://localhost:8080",
 ]);
 
+// Production frontend origins (always allowed)
+const productionOrigins = new Set([
+  "https://barber-bang.netlify.app",
+]);
+
 const allowedOrigins = new Set(corsOriginList);
+// Always allow production frontend origins
+for (const o of productionOrigins) allowedOrigins.add(o);
+// Allow localhost origins in development
 if (!isProd) {
   for (const o of localhostOrigins) allowedOrigins.add(o);
 }
