@@ -127,11 +127,22 @@ function verifyStripeTotal({ quoteTotalMinor, line_items }) {
 
 /**
  * Hard sanitize path joins for URL building
+ * Ensures URL has a valid scheme (https:// or http://)
  */
 function normalizeUrlBase(raw) {
-  const base = String(raw || "").trim();
+  let base = String(raw || "").trim();
   if (!base) return "";
-  return base.replace(/\/+$/, "");
+
+  // Remove trailing slashes
+  base = base.replace(/\/+$/, "");
+
+  // Ensure URL has a scheme
+  if (base && !base.startsWith("http://") && !base.startsWith("https://")) {
+    // Default to https for production URLs
+    base = `https://${base}`;
+  }
+
+  return base;
 }
 
 /* ============================
