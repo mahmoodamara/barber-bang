@@ -281,8 +281,13 @@ export async function createCheckoutSession({ orderId, quote, lang, idempotencyK
   }
 
   // Build URLs
-  const base =
-    normalizeUrlBase(process.env.CLIENT_URL || process.env.FRONTEND_URL) || "http://localhost:5173";
+  // Production fallback: use Netlify frontend if no env var is set
+  const envBase = process.env.CLIENT_URL || process.env.FRONTEND_URL;
+  const productionFallback = "https://barber-bang.netlify.app";
+  const devFallback = "http://localhost:5173";
+  const isProd = process.env.NODE_ENV === "production";
+
+  const base = normalizeUrlBase(envBase) || (isProd ? productionFallback : devFallback);
 
   const successPath = String(process.env.STRIPE_SUCCESS_PATH || "/checkout/success");
   const cancelPath = String(process.env.STRIPE_CANCEL_PATH || "/checkout/cancel");
