@@ -52,6 +52,12 @@ const registerSchema = z.object({
   }),
 });
 
+/**
+ * POST /register
+ * On success: data.token and data.user are set, or data.user is null with data.requiresLogin true.
+ * When data.user === null, client must not access data.user (e.g. data.user.name); show generic
+ * "Please sign in" and redirect to login.
+ */
 router.post("/register", validate(registerSchema), async (req, res) => {
   const startAt = Date.now();
   const { name, email, password } = req.validated.body;
@@ -60,7 +66,8 @@ router.post("/register", validate(registerSchema), async (req, res) => {
 
   const exists = await User.findOne({ email: safeEmail }).select("_id");
   if (exists) {
-    // Prevent account enumeration: return generic success
+    // Prevent account enumeration: return generic success. Client must not access data.user
+    // when data.user === null; use data.requiresLogin to show "Please sign in" and redirect.
     const rounds = Number(process.env.BCRYPT_ROUNDS || 10);
     await bcrypt.hash(password, rounds);
 
@@ -74,6 +81,7 @@ router.post("/register", validate(registerSchema), async (req, res) => {
       okPayload({
         token: null,
         user: null,
+        requiresLogin: true, // client: do not use user; show "Please sign in" and redirect
       })
     );
   }
