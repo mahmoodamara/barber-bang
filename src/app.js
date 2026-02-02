@@ -211,9 +211,13 @@ let corsOriginList = corsOriginEnv
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
-if (isProd && corsOriginList.length === 0) {
-  corsOriginList = [DEFAULT_FRONTEND_ORIGIN];
+
+// Always include default frontend origin (fixes CORS when env not set on Render)
+if (!corsOriginList.includes(DEFAULT_FRONTEND_ORIGIN)) {
+  corsOriginList.push(DEFAULT_FRONTEND_ORIGIN);
 }
+
+log.info({ corsOriginList, isProd }, "[cors] Allowed origins");
 
 const localhostOrigins = new Set([
   "http://localhost:5173",
@@ -239,6 +243,9 @@ const corsConfig = {
     // Allow server-to-server / curl / Postman with no origin
     if (!origin) return cb(null, true);
     if (allowedOrigins.has(origin)) return cb(null, true);
+
+    // Log rejected origins for debugging
+    log.warn({ origin, allowedOrigins: [...allowedOrigins] }, "[cors] Origin rejected");
 
     const err = new Error("CORS_NOT_ALLOWED");
     err.statusCode = 403;
