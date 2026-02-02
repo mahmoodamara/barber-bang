@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import { Order } from "../models/Order.js";
 import { createStripeRefund } from "./stripe.service.js";
 import { evaluateReturnEligibility, computeReturnRefundAmountMajor } from "../utils/returns.policy.js";
+import { recordOrderRefund } from "./ranking.service.js";
 
 /* ============================
    Helpers
@@ -145,6 +146,17 @@ export async function refundStripeOrder({
       },
       { new: true }
     );
+
+    /**
+     * ✅ DELIVERABLE #4: Update ranking/stats after successful refund
+     * Uses analytics.refundCountedAt marker for idempotency
+     */
+    await recordOrderRefund(updated, {
+      refundAmountMinor: Math.round(refundAmount * 100),
+      reason: normReason,
+    }).catch((e) => {
+      console.warn("[refunds.service] recordOrderRefund failed:", String(e?.message || e));
+    });
 
     return updated;
   } catch (e) {

@@ -5,14 +5,18 @@
 import { StockReservation } from "../models/StockReservation.js";
 import { Order } from "../models/Order.js";
 import { Product } from "../models/Product.js";
+import { Coupon } from "../models/Coupon.js";
+import { CouponReservation } from "../models/CouponReservation.js";
 import mongoose from "mongoose";
 import { releaseCouponReservation } from "../services/pricing.service.js";
+import { releaseStockReservation } from "../services/products.service.js";
 
 // Configuration
 const DEFAULT_INTERVAL_MS = 3 * 60 * 1000; // 3 minutes
 const GRACE_WINDOW_MS = 5 * 60 * 1000; // 5 minutes - don't touch reservations newer than this
 const BATCH_LIMIT = 100; // Max reservations to process per run
 const EXPIRED_GRACE_MS = 2 * 60 * 1000; // 2 minutes after expiresAt before we force-release
+const STRIPE_CHECKOUT_STALE_MIN = Number(process.env.STRIPE_CHECKOUT_STALE_MINUTES) || 15;
 
 // State
 let intervalId = null;
@@ -192,38 +196,108 @@ async function cleanupStaleConfirmedReservations(now) {
 }
 
 /**
- * Release expired coupon reservations (Stripe checkout holds)
+ * Release expired coupon reservations (CouponReservation collection)
+ * - Marks reservation as expired
+ * - Decrements Coupon.reservedCount
+ * - Best-effort updates Order.couponReservation status
  */
 async function releaseExpiredCouponReservations(now) {
-  const orders = await Order.find({
-    "couponReservation.status": "reserved",
-    "couponReservation.expiresAt": { $ne: null, $lt: now },
-    status: { $in: ["pending_payment", "pending_cod", "cod_pending_approval"] },
+  const reservations = await CouponReservation.find({
+    status: "active",
+    expiresAt: { $ne: null, $lt: now },
   })
     .limit(BATCH_LIMIT)
     .lean();
 
-  let released = 0;
+  let expired = 0;
+  const errors = [];
+
+  for (const r of reservations) {
+    try {
+      const updated = await CouponReservation.findOneAndUpdate(
+        { _id: r._id, status: "active" },
+        { $set: { status: "expired" } }
+      );
+      if (!updated) continue;
+
+      await Coupon.updateOne(
+        { _id: r.couponId, reservedCount: { $gt: 0 } },
+        { $inc: { reservedCount: -1 } }
+      ).catch(() => {});
+
+      if (r.orderId) {
+        await Order.updateOne(
+          { _id: r.orderId, "couponReservation.status": "reserved" },
+          { $set: { "couponReservation.status": "expired" } }
+        ).catch(() => {});
+      }
+
+      expired++;
+    } catch (err) {
+      errors.push(`orderId=${r.orderId}: ${String(err?.message || err)}`);
+    }
+  }
+
+  return { checked: reservations.length, expired, errors };
+}
+
+/**
+ * Cleanup stale Stripe checkout orders missing sessionId
+ */
+async function cleanupStaleStripeCheckoutOrders(now) {
+  if (!Number.isFinite(STRIPE_CHECKOUT_STALE_MIN) || STRIPE_CHECKOUT_STALE_MIN <= 0) {
+    return { checked: 0, cleaned: 0, errors: [] };
+  }
+
+  const staleBefore = new Date(now.getTime() - STRIPE_CHECKOUT_STALE_MIN * 60 * 1000);
+  const orders = await Order.find({
+    paymentMethod: "stripe",
+    status: "pending_payment",
+    createdAt: { $lt: staleBefore },
+    $or: [
+      { "stripe.sessionId": { $exists: false } },
+      { "stripe.sessionId": null },
+      { "stripe.sessionId": "" },
+    ],
+  })
+    .limit(BATCH_LIMIT)
+    .lean();
+
+  let cleaned = 0;
   const errors = [];
 
   for (const o of orders) {
     try {
-      const code = String(o?.couponReservation?.code || o?.pricing?.discounts?.coupon?.code || o?.pricing?.couponCode || "").trim();
+      await releaseStockReservation({ orderId: o._id }).catch(() => {});
+
+      const code = String(
+        o?.couponReservation?.code ||
+          o?.pricing?.discounts?.coupon?.code ||
+          o?.pricing?.couponCode ||
+          ""
+      ).trim();
       if (code) {
-        await releaseCouponReservation({ code, orderId: o._id });
+        await releaseCouponReservation({ code, orderId: o._id }).catch(() => {});
       }
 
       await Order.updateOne(
-        { _id: o._id, "couponReservation.status": "reserved" },
-        { $set: { "couponReservation.status": "expired" } }
+        { _id: o._id, status: "pending_payment" },
+        {
+          $set: {
+            status: "cancelled",
+            internalNote: "Checkout session missing; auto-cancelled",
+            ...(code ? { "couponReservation.status": "released" } : {}),
+          },
+        }
       );
-      released++;
+
+      cleaned++;
     } catch (err) {
       errors.push(`orderId=${o._id}: ${String(err?.message || err)}`);
     }
   }
 
-  return { checked: orders.length, released, errors };
+  return { checked: orders.length, cleaned, errors };
 }
 
 /**
@@ -243,11 +317,12 @@ async function runRepairJob() {
   try {
     console.info("[repair-job] Starting reservation repair job...");
 
-    const [orphaned, expired, stale, couponExpired] = await Promise.all([
+    const [orphaned, expired, stale, couponExpired, checkoutStale] = await Promise.all([
       repairOrphanedReservations(now),
       releaseExpiredReservations(now),
       cleanupStaleConfirmedReservations(now),
       releaseExpiredCouponReservations(now),
+      cleanupStaleStripeCheckoutOrders(now),
     ]);
 
     const stats = {
@@ -257,8 +332,19 @@ async function runRepairJob() {
       expired,
       stale,
       couponExpired,
-      totalRepaired: orphaned.repaired + expired.released + stale.cleaned + couponExpired.released,
-      totalErrors: orphaned.errors.length + expired.errors.length + stale.errors.length + couponExpired.errors.length,
+      checkoutStale,
+      totalRepaired:
+        orphaned.repaired +
+        expired.released +
+        stale.cleaned +
+        (couponExpired.expired || 0) +
+        (checkoutStale.cleaned || 0),
+      totalErrors:
+        orphaned.errors.length +
+        expired.errors.length +
+        stale.errors.length +
+        couponExpired.errors.length +
+        checkoutStale.errors.length,
     };
 
     lastRunAt = now;

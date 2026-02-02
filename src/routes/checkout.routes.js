@@ -29,6 +29,8 @@ import {
   releaseExpiredReservations,
 } from "../services/products.service.js";
 import { getRequestId } from "../middleware/error.js";
+import { getCheckoutFailureCounter } from "../middleware/prometheus.js";
+import { onCheckoutFailure } from "../utils/alertHooks.js";
 
 const router = express.Router();
 
@@ -107,15 +109,24 @@ function makeErr(statusCode, code, message, extra = {}) {
   return err;
 }
 
+const checkoutFailuresTotal = getCheckoutFailureCounter();
+
 function jsonErr(res, e) {
   const req = res.req;
+  const code = e?.code || "INTERNAL_ERROR";
+  const url = req?.originalUrl || req?.url || "";
+  if (String(url).includes("checkout")) {
+    checkoutFailuresTotal.inc({ code });
+    onCheckoutFailure(code, getRequestId(req));
+  }
   return res.status(e?.statusCode || 500).json({
     ok: false,
     error: {
-      code: e?.code || "INTERNAL_ERROR",
+      code,
       message: e?.message || "Unexpected error",
       requestId: getRequestId(req),
-      path: req?.originalUrl || req?.url || "",
+      path: url,
+      ...(e?.details ? { details: e.details } : {}),
     },
   });
 }
@@ -457,9 +468,6 @@ router.post("/cod", requireAuth(), validate(quoteSchema), async (req, res) => {
   let fallbackUsed = false;
 
   try {
-    const cartItems = await getCartItemsOrThrow(req.user._id);
-    const b = req.validated.body;
-
     const idemKey = pickIdempotencyKey(req);
 
     // idempotency: if exists, return it
@@ -469,6 +477,9 @@ router.post("/cod", requireAuth(), validate(quoteSchema), async (req, res) => {
       paymentMethod: "cod",
     });
     if (existing) return res.status(200).json({ ok: true, data: existing });
+
+    const cartItems = await getCartItemsOrThrow(req.user._id);
+    const b = req.validated.body;
 
     const shipping = await attachShippingSnapshots(toShippingInput(b));
 
@@ -496,7 +507,7 @@ router.post("/cod", requireAuth(), validate(quoteSchema), async (req, res) => {
     }
 
     await releaseExpiredReservations().catch((e) => {
-      console.warn("[best-effort] checkout release expired reservations failed:", String(e?.message || e));
+      req.log.warn({ err: String(e?.message || e) }, "[best-effort] checkout release expired reservations failed");
     });
 
     const discountTotal = calcDiscountTotal(quote);
@@ -588,11 +599,11 @@ router.post("/cod", requireAuth(), validate(quoteSchema), async (req, res) => {
 
             couponReservation: couponAppliedCode
               ? {
-                  code: couponAppliedCode,
-                  status: "consumed",
-                  reservedAt: new Date(),
-                  expiresAt: null,
-                }
+                code: couponAppliedCode,
+                status: "consumed",
+                reservedAt: new Date(),
+                expiresAt: null,
+              }
               : undefined,
           },
         ],
@@ -610,6 +621,8 @@ router.post("/cod", requireAuth(), validate(quoteSchema), async (req, res) => {
         const couponResult = await consumeCouponAtomic({
           code: couponAppliedCode,
           orderId,
+          userId: req.user._id,
+          discountAmount: Number(quote?.discounts?.coupon?.amount || 0),
           session,
         });
         if (!couponResult.success && !couponResult.alreadyUsed) {
@@ -629,12 +642,12 @@ router.post("/cod", requireAuth(), validate(quoteSchema), async (req, res) => {
     // Best-effort cleanup in fallback mode (no transaction)
     if (fallbackUsed && reserved && orderId) {
       await releaseStockReservation({ orderId }).catch((cleanupErr) => {
-        console.warn("[best-effort] checkout release stock reservation failed:", String(cleanupErr?.message || cleanupErr));
+        req.log.warn({ err: String(cleanupErr?.message || cleanupErr) }, "[best-effort] checkout release stock reservation failed");
       });
     }
     if (fallbackUsed && orderCreated && orderId) {
       await Order.deleteOne({ _id: orderId }).catch((cleanupErr) => {
-        console.warn("[best-effort] checkout cleanup delete order failed:", String(cleanupErr?.message || cleanupErr));
+        req.log.warn({ err: String(cleanupErr?.message || cleanupErr) }, "[best-effort] checkout cleanup delete order failed");
       });
     }
 
@@ -658,6 +671,9 @@ router.post("/stripe", requireAuth(), validate(quoteSchema), async (req, res) =>
   let couponReserved = false;
   let couponCodeForReservation = "";
   let couponReservationExpiresAt = null;
+  let orderCreated = false;
+  let fallbackUsed = false;
+  let cleanupPerformed = false;
   try {
     const cartItems = await getCartItemsOrThrow(req.user._id);
     const b = req.validated.body;
@@ -690,7 +706,7 @@ router.post("/stripe", requireAuth(), validate(quoteSchema), async (req, res) =>
             },
           });
         } catch (e) {
-          console.warn("[best-effort] checkout stripe retrieve session failed:", String(e?.message || e));
+          req.log.warn({ err: String(e?.message || e) }, "[best-effort] checkout stripe retrieve session failed");
           // retrieve failed - fall through to return baseData (frontend can retry with new key)
           return res.json({ ok: true, data: baseData });
         }
@@ -726,7 +742,7 @@ router.post("/stripe", requireAuth(), validate(quoteSchema), async (req, res) =>
     }
 
     await releaseExpiredReservations().catch((e) => {
-      console.warn("[best-effort] checkout release expired reservations failed:", String(e?.message || e));
+      req.log.warn({ err: String(e?.message || e) }, "[best-effort] checkout release expired reservations failed");
     });
 
     const discountTotal = calcDiscountTotal(quote);
@@ -739,44 +755,50 @@ router.post("/stripe", requireAuth(), validate(quoteSchema), async (req, res) =>
     // ✅ Build reservation items: cart items + gifts (unified stock reservation)
     const reservationItems = buildReservationItems(quote.items, quote.gifts);
 
-    orderId = new mongoose.Types.ObjectId();
-    const orderNumber = await getNextOrderNumber();
+    const order = await withMongoTransaction(async (session) => {
+      fallbackUsed = session === null;
+      reserved = false;
+      orderCreated = false;
+      orderId = new mongoose.Types.ObjectId();
+      const orderNumber = await getNextOrderNumber(session);
 
-    if (couponAppliedCode) {
-      const resv = await reserveCouponAtomic({
-        code: couponAppliedCode,
-        orderId,
-        ttlMinutes: Number(process.env.COUPON_RESERVATION_TTL_MINUTES || 15),
-      });
-      if (!resv.success) {
-        return jsonErr(
-          res,
-          makeErr(400, resv.error || "COUPON_RESERVATION_FAILED", "Coupon could not be reserved")
-        );
+      if (couponAppliedCode) {
+        const resv = await reserveCouponAtomic({
+          code: couponAppliedCode,
+          orderId,
+          userId: req.user._id,
+          ttlMinutes: Number(process.env.COUPON_RESERVATION_TTL_MINUTES || 15),
+          session,
+        });
+        if (!resv.success) {
+          throw makeErr(400, resv.error || "COUPON_RESERVATION_FAILED", "Coupon could not be reserved");
+        }
+        couponReserved = true;
+        couponReservationExpiresAt = resv.expiresAt || getCouponReservationExpiry();
       }
-      couponReserved = true;
-      couponReservationExpiresAt = resv.expiresAt || getCouponReservationExpiry();
-    }
 
-    // ✅ Reserve stock for BOTH items and gifts
-    await reserveStockForOrder({
-      orderId,
-      userId: req.user._id,
-      items: reservationItems,
-      ttlMinutes: 15,
-    });
-    reserved = true;
+      // ✅ Reserve stock for BOTH items and gifts
+      await reserveStockForOrder({
+        orderId,
+        userId: req.user._id,
+        items: reservationItems,
+        ttlMinutes: 15,
+        session,
+      });
+      reserved = true;
 
-    const order = await Order.create({
-      _id: orderId,
-      userId: req.user._id,
-      orderNumber,
+      const created = await Order.create(
+        [
+          {
+            _id: orderId,
+            userId: req.user._id,
+            orderNumber,
 
-      items: orderItems,
-      gifts: giftItems,
+            items: orderItems,
+            gifts: giftItems,
 
-      status: "pending_payment",
-      paymentMethod: "stripe",
+            status: "pending_payment",
+            paymentMethod: "stripe",
 
             pricing: {
               subtotal: Number(quote.subtotal || 0),
@@ -793,45 +815,52 @@ router.post("/stripe", requireAuth(), validate(quoteSchema), async (req, res) =>
               totalBeforeVat: Number(quote.totalBeforeVat || 0),
               totalAfterVat: Number(quote.totalAfterVat || 0),
 
-        // additive legacy
-        discountTotal: Number(discountTotal || 0),
-        couponCode: couponAppliedCode,
-        campaignId: quote?.meta?.campaignId || null,
+              // additive legacy
+              discountTotal: Number(discountTotal || 0),
+              couponCode: couponAppliedCode,
+              campaignId: quote?.meta?.campaignId || null,
 
-        // minor mirrors
-        subtotalMinor: Number(quote.subtotalMinor || 0),
-        shippingFeeMinor: Number(quote.shippingFeeMinor || 0),
-        discountTotalMinor: Number(toMinorUnits(discountTotal || 0)),
-        totalMinor: Number(quote.totalMinor || 0),
-        vatAmountMinor: Number(quote.vatAmountMinor || 0),
-        totalBeforeVatMinor: Number(quote.totalBeforeVatMinor || 0),
-        totalAfterVatMinor: Number(quote.totalAfterVatMinor || 0),
-      },
-      pricingMinor: {
-        subtotal: toMinorUnits(quote.subtotal || 0),
-        shippingFee: toMinorUnits(quote.shippingFee || 0),
-        vatAmount: toMinorUnits(quote.vatAmount || 0),
-        totalBeforeVat: toMinorUnits(quote.totalBeforeVat || 0),
-        totalAfterVat: toMinorUnits(quote.totalAfterVat || 0),
-        total: toMinorUnits(quote.total || 0),
-      },
+              // minor mirrors
+              subtotalMinor: Number(quote.subtotalMinor || 0),
+              shippingFeeMinor: Number(quote.shippingFeeMinor || 0),
+              discountTotalMinor: Number(toMinorUnits(discountTotal || 0)),
+              totalMinor: Number(quote.totalMinor || 0),
+              vatAmountMinor: Number(quote.vatAmountMinor || 0),
+              totalBeforeVatMinor: Number(quote.totalBeforeVatMinor || 0),
+              totalAfterVatMinor: Number(quote.totalAfterVatMinor || 0),
+            },
+            pricingMinor: {
+              subtotal: toMinorUnits(quote.subtotal || 0),
+              shippingFee: toMinorUnits(quote.shippingFee || 0),
+              vatAmount: toMinorUnits(quote.vatAmount || 0),
+              totalBeforeVat: toMinorUnits(quote.totalBeforeVat || 0),
+              totalAfterVat: toMinorUnits(quote.totalAfterVat || 0),
+              total: toMinorUnits(quote.total || 0),
+            },
 
-      shipping: shippingWithSnapshots,
+            shipping: shippingWithSnapshots,
 
-      stripe: { sessionId: "", paymentIntentId: "" },
+            stripe: { sessionId: "", paymentIntentId: "" },
 
-      idempotency: {
-        checkoutKey: idemKey || "",
-      },
+            idempotency: {
+              checkoutKey: idemKey || "",
+            },
 
-      couponReservation: couponAppliedCode
-        ? {
-            code: couponAppliedCode,
-            status: "reserved",
-            reservedAt: new Date(),
-            expiresAt: couponReservationExpiresAt || getCouponReservationExpiry(),
-          }
-        : undefined,
+            couponReservation: couponAppliedCode
+              ? {
+                code: couponAppliedCode,
+                status: "reserved",
+                reservedAt: new Date(),
+                expiresAt: couponReservationExpiresAt || getCouponReservationExpiry(),
+              }
+              : undefined,
+          },
+        ],
+        session ? { session } : {}
+      );
+
+      orderCreated = true;
+      return created?.[0] || created;
     });
 
     const stripeQuote = buildStripeQuote(quote);
@@ -845,12 +874,27 @@ router.post("/stripe", requireAuth(), validate(quoteSchema), async (req, res) =>
         idempotencyKey: idemKey || undefined,
       });
     } catch (err) {
-      await Order.deleteOne({ _id: order._id }).catch((e) => {
-        console.warn("[best-effort] checkout cleanup delete order failed:", String(e?.message || e));
-      });
       await releaseStockReservation({ orderId: order._id }).catch((e) => {
-        console.warn("[best-effort] checkout release stock reservation failed:", String(e?.message || e));
+        req.log.warn({ err: String(e?.message || e) }, "[best-effort] checkout release stock reservation failed");
       });
+      if (couponAppliedCode) {
+        await releaseCouponReservation({ code: couponAppliedCode, orderId: order._id }).catch((e) => {
+          req.log.warn({ err: String(e?.message || e) }, "[best-effort] checkout release coupon reservation failed");
+        });
+      }
+      await Order.updateOne(
+        { _id: order._id, status: "pending_payment" },
+        {
+          $set: {
+            status: "cancelled",
+            internalNote: "Checkout session creation failed (auto-cancelled)",
+            ...(couponAppliedCode ? { "couponReservation.status": "released" } : {}),
+          },
+        }
+      ).catch((e) => {
+        req.log.warn({ err: String(e?.message || e) }, "[best-effort] checkout cleanup order cancel failed");
+      });
+      cleanupPerformed = true;
       throw err;
     }
 
@@ -867,17 +911,19 @@ router.post("/stripe", requireAuth(), validate(quoteSchema), async (req, res) =>
       },
     });
   } catch (e) {
-    if (reserved && orderId) {
-      await releaseStockReservation({ orderId }).catch((e) => {
-        console.warn("[best-effort] checkout release stock reservation failed:", String(e?.message || e));
-      });
-      await Order.deleteOne({ _id: orderId, status: "pending_payment", "stripe.sessionId": "" }).catch((e) => {
-        console.warn("[best-effort] checkout cleanup delete order failed:", String(e?.message || e));
+    if (!cleanupPerformed && fallbackUsed && reserved && orderId) {
+      await releaseStockReservation({ orderId }).catch((err) => {
+        req.log.warn({ err: String(err?.message || err) }, "[best-effort] checkout release stock reservation failed");
       });
     }
-    if (couponReserved && couponCodeForReservation && orderId) {
+    if (!cleanupPerformed && fallbackUsed && orderCreated && orderId) {
+      await Order.deleteOne({ _id: orderId, status: "pending_payment", "stripe.sessionId": "" }).catch((err) => {
+        req.log.warn({ err: String(err?.message || err) }, "[best-effort] checkout cleanup delete order failed");
+      });
+    }
+    if (!cleanupPerformed && fallbackUsed && couponReserved && couponCodeForReservation && orderId) {
       await releaseCouponReservation({ code: couponCodeForReservation, orderId }).catch((cleanupErr) => {
-        console.warn("[best-effort] checkout release coupon reservation failed:", String(cleanupErr?.message || cleanupErr));
+        req.log.warn({ err: String(cleanupErr?.message || cleanupErr) }, "[best-effort] checkout release coupon reservation failed");
       });
     }
     return jsonErr(res, e);

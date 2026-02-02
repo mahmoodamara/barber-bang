@@ -4,6 +4,7 @@ import { z } from "zod";
 import mongoose from "mongoose";
 
 import { Category } from "../models/Category.js";
+import { Product } from "../models/Product.js";
 import { requireAuth, requirePermission, PERMISSIONS } from "../middleware/auth.js";
 import { auditAdmin } from "../middleware/audit.js";
 import { validate } from "../middleware/validate.js";
@@ -59,13 +60,16 @@ function sanitizeText(input, maxLen = 500) {
 }
 
 /**
- * Map category for response with localized name
+ * Map category for response with localized name.
+ * Ensures slug is never "" so frontend Select.Item (Radix) never receives value="" .
  */
 function mapCategory(cat, lang = "he") {
   if (!cat) return null;
   const obj = cat.toObject ? cat.toObject() : cat;
+  const slug = (obj.slug && String(obj.slug).trim()) ? obj.slug : (obj._id ? String(obj._id) : "__pending__");
   return {
     ...obj,
+    slug,
     name: t(obj, "name", lang),
   };
 }
@@ -338,12 +342,35 @@ router.delete("/:id", validate(idParamSchema), async (req, res) => {
       throw makeErr(400, "INVALID_ID", "Invalid category id");
     }
 
-    const item = await Category.findByIdAndDelete(id).lean();
-    if (!item) {
+    // Check if category exists
+    const category = await Category.findById(id);
+    if (!category) {
       throw makeErr(404, "NOT_FOUND", "Category not found");
     }
 
-    return sendOk(res, { deleted: true, id: item._id });
+    // Check for product references (including soft-deleted products)
+    const productCount = await Product.countDocuments({ categoryId: id });
+    if (productCount > 0) {
+      throw makeErr(
+        409,
+        "CATEGORY_HAS_PRODUCTS",
+        `Cannot delete category: ${productCount} product(s) are still referencing this category`
+      );
+    }
+
+    // Check for child categories
+    const childCount = await Category.countDocuments({ parentId: id });
+    if (childCount > 0) {
+      throw makeErr(
+        409,
+        "CATEGORY_HAS_CHILDREN",
+        `Cannot delete category: ${childCount} child category/categories still exist`
+      );
+    }
+
+    await Category.deleteOne({ _id: id });
+
+    return sendOk(res, { deleted: true, id: category._id });
   } catch (e) {
     return jsonErr(res, e);
   }

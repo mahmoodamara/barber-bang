@@ -1,4 +1,4 @@
-// scripts/seed.js
+﻿// scripts/seed.js
 // ✅ FULL Production-grade Seeder for this server (ESM)
 // - Refuses to run in production unless ALLOW_SEED_PROD=true
 // - Deletes ALL existing data first (in safe order)
@@ -21,6 +21,8 @@ import { PickupPoint } from "../models/PickupPoint.js";
 import { StorePickupConfig } from "../models/StorePickupConfig.js";
 
 import { Coupon } from "../models/Coupon.js";
+import { CouponReservation } from "../models/CouponReservation.js";
+import { CouponRedemption } from "../models/CouponRedemption.js";
 import { Campaign } from "../models/Campaign.js";
 import { Offer } from "../models/Offer.js";
 import { Gift } from "../models/Gift.js";
@@ -35,6 +37,8 @@ import { StockReservation } from "../models/StockReservation.js";
 import { Order } from "../models/Order.js";
 import { ReturnRequest } from "../models/ReturnRequest.js";
 import { AuditLog } from "../models/AuditLog.js";
+import { AdminApproval } from "../models/AdminApproval.js";
+import { Payment } from "../models/Payment.js";
 import { ProductEngagement } from "../models/ProductEngagement.js";
 import { ProductSignalDaily } from "../models/ProductSignalDaily.js";
 import { Counter } from "../models/Counter.js";
@@ -55,13 +59,33 @@ function nowPlusDays(days) {
   return d;
 }
 
+/**
+ * STRICT: Seed is disabled in production. No override.
+ */
 function mustNotRunInProd() {
-  const isProd = String(process.env.NODE_ENV || "").toLowerCase() === "production";
-  const allow = String(process.env.ALLOW_SEED_PROD || "").trim().toLowerCase() === "true";
-  if (isProd && !allow) {
-    throw new Error(
-      "Refusing to run seed in production. Set ALLOW_SEED_PROD=true only if you really know what you are doing."
-    );
+  if (String(process.env.NODE_ENV || "").toLowerCase() === "production") {
+    console.error("❌ Seed is disabled in production.");
+    process.exit(1);
+  }
+}
+
+/**
+ * Require seed env vars; exit 1 with clear message if any missing.
+ * Never log plaintext passwords.
+ */
+function validateSeedEnv() {
+  const required = [
+    "SEED_ADMIN_EMAIL",
+    "SEED_ADMIN_PASSWORD",
+    "SEED_STAFF_EMAIL",
+    "SEED_STAFF_PASSWORD",
+    "SEED_TEST_EMAIL",
+    "SEED_TEST_PASSWORD",
+  ];
+  const missing = required.filter((k) => !process.env[k] || String(process.env[k]).trim() === "");
+  if (missing.length) {
+    console.error(`Missing required env for seed: ${missing.join(", ")}. Set them before running seed.`);
+    process.exit(1);
   }
 }
 
@@ -79,6 +103,8 @@ async function wipeDatabase() {
   // Order matters (avoid reference/logic constraints in services)
   const deletionOrder = [
     { model: AuditLog, name: "Audit Logs" },
+    { model: AdminApproval, name: "Admin Approvals" },
+    { model: Payment, name: "Payments" },
 
     { model: ProductEngagement, name: "Product Engagement" },
     { model: ProductSignalDaily, name: "Product Signals Daily" },
@@ -86,6 +112,9 @@ async function wipeDatabase() {
     { model: StockReservation, name: "Stock Reservations" },
     { model: ReturnRequest, name: "Return Requests" },
     { model: Order, name: "Orders" },
+
+    { model: CouponRedemption, name: "Coupon Redemptions" },
+    { model: CouponReservation, name: "Coupon Reservations" },
 
     { model: Review, name: "Reviews" },
     { model: Gift, name: "Gifts" },
@@ -131,13 +160,13 @@ async function wipeDatabase() {
 async function createUsers() {
   console.log("👤 Creating users...");
 
-  const adminEmail = String(process.env.SEED_ADMIN_EMAIL || "admin@shop.local").toLowerCase();
-  const staffEmail = String(process.env.SEED_STAFF_EMAIL || "staff@shop.local").toLowerCase();
-  const testEmail = String(process.env.SEED_TEST_EMAIL || "test@shop.local").toLowerCase();
+  const adminEmail = String(process.env.SEED_ADMIN_EMAIL).trim().toLowerCase();
+  const staffEmail = String(process.env.SEED_STAFF_EMAIL).trim().toLowerCase();
+  const testEmail = String(process.env.SEED_TEST_EMAIL).trim().toLowerCase();
 
-  const adminPassword = String(process.env.SEED_ADMIN_PASSWORD || "Admin1234");
-  const staffPassword = String(process.env.SEED_STAFF_PASSWORD || "Staff1234");
-  const testPassword = String(process.env.SEED_TEST_PASSWORD || "Test1234");
+  const adminPassword = String(process.env.SEED_ADMIN_PASSWORD);
+  const staffPassword = String(process.env.SEED_STAFF_PASSWORD);
+  const testPassword = String(process.env.SEED_TEST_PASSWORD);
 
   const saltRounds = Number(process.env.BCRYPT_ROUNDS || 10);
 
@@ -980,6 +1009,7 @@ async function createPromos(products, categories) {
 
 async function main() {
   mustNotRunInProd();
+  validateSeedEnv();
 
   await connectDB();
 
@@ -1042,19 +1072,10 @@ async function main() {
     console.log("✅ Ranking stats updated");
 
     console.log("\n✅ SEED COMPLETED SUCCESSFULLY\n");
-    console.log("🔐 Accounts:");
-    console.log(
-      `Admin: ${process.env.SEED_ADMIN_EMAIL || "admin@shop.local"} / ${process.env.SEED_ADMIN_PASSWORD || "Admin1234"
-      }`
-    );
-    console.log(
-      `Staff: ${process.env.SEED_STAFF_EMAIL || "staff@shop.local"} / ${process.env.SEED_STAFF_PASSWORD || "Staff1234"
-      }`
-    );
-    console.log(
-      `User : ${process.env.SEED_TEST_EMAIL || "test@shop.local"} / ${process.env.SEED_TEST_PASSWORD || "Test1234"
-      }`
-    );
+    console.log("🔐 Accounts created (emails only):");
+    console.log(`  Admin: ${String(process.env.SEED_ADMIN_EMAIL).trim().toLowerCase()}`);
+    console.log(`  Staff: ${String(process.env.SEED_STAFF_EMAIL).trim().toLowerCase()}`);
+    console.log(`  Test:  ${String(process.env.SEED_TEST_EMAIL).trim().toLowerCase()}`);
   } catch (e) {
     console.error("❌ Seed failed:", e);
     process.exitCode = 1;

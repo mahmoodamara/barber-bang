@@ -5,6 +5,7 @@ import mongoose from "mongoose";
 
 import { Product } from "../models/Product.js";
 import { ProductAttribute } from "../models/ProductAttribute.js";
+import { Category } from "../models/Category.js";
 import { requireAuth, requirePermission, PERMISSIONS } from "../middleware/auth.js";
 import { auditAdmin } from "../middleware/audit.js";
 import { validate } from "../middleware/validate.js";
@@ -56,6 +57,20 @@ function jsonErr(res, e) {
 
 function safeNotFound(res, code = "NOT_FOUND", message = "Not found") {
   return sendError(res, 404, code, message);
+}
+
+/**
+ * Validate that a Category exists by ID.
+ * Only performs DB lookup when categoryId is provided.
+ * @param {string|undefined} categoryId - The category ID to validate
+ * @throws {Error} If categoryId is provided but category doesn't exist
+ */
+async function validateCategoryExists(categoryId) {
+  if (!categoryId) return; // Skip if not provided - no extra DB read
+  const exists = await Category.exists({ _id: categoryId });
+  if (!exists) {
+    throw makeErr(400, "CATEGORY_NOT_FOUND", "Category not found");
+  }
 }
 
 function toMinorSafe(major) {
@@ -303,7 +318,8 @@ function mapProductAdmin(p, lang) {
     descriptionHe: obj.descriptionHe || obj.description || "",
     descriptionAr: obj.descriptionAr || "",
     description: t(obj, "description", lang),
-    slug: obj.slug || "",
+    // Never send empty string for slug (Radix Select.Item disallows value="")
+    slug: (obj.slug && String(obj.slug).trim()) ? obj.slug : (obj._id ? String(obj._id) : "__pending__"),
     price: Number(obj.price || 0),
     priceMinor: obj.priceMinor || 0,
     stock: Number(obj.stock || 0),
@@ -361,7 +377,6 @@ const ALLOWED_PATCH_FIELDS = new Set([
   "stock",
   "categoryId",
   "imageUrl",
-  "images",
   "isActive",
   "salePrice",
   "discountPercent",
@@ -381,12 +396,30 @@ const ALLOWED_PATCH_FIELDS = new Set([
   "importerName",
   "countryOfOrigin",
   "warrantyInfo",
+]);
+
+// Computed fields that must NEVER be updated directly
+const FORBIDDEN_PATCH_FIELDS = new Set([
+  "variantKey",
+  "priceMinor",
+  "salePriceMinor",
+  "priceOverrideMinor",
+  "stats",
+  "isDeleted",
+  "deletedAt",
+  "images",
   "variants",
+  "_id",
+  "createdAt",
+  "updatedAt",
 ]);
 
 function filterPatchFields(body) {
   const result = {};
   for (const key of Object.keys(body)) {
+    if (FORBIDDEN_PATCH_FIELDS.has(key)) {
+      continue; // Skip forbidden fields silently
+    }
     if (ALLOWED_PATCH_FIELDS.has(key)) {
       result[key] = body[key];
     }
@@ -490,6 +523,8 @@ const createBodySchema = z
     }
   });
 
+// NOTE: variants and images are NOT in patchBodySchema
+// Use dedicated endpoints: PUT /:id/variants, PATCH /:id/images
 const patchBodySchema = z
   .object({
     titleHe: z.string().min(2).max(160).optional(),
@@ -521,7 +556,6 @@ const patchBodySchema = z
     importerName: z.string().max(160).optional(),
     countryOfOrigin: z.string().max(120).optional(),
     warrantyInfo: z.string().max(400).optional(),
-    variants: z.array(variantSchema).optional(),
   })
   .strict()
   .superRefine((b, ctx) => {
@@ -622,29 +656,53 @@ router.get("/", validate(listQuerySchema), async (req, res) => {
       filter["variants.0"] = { $exists: false };
     }
 
+    // Track if we're using $text search for sorting decisions
+    let useTextSearch = false;
+    
     if (q.search) {
       const search = String(q.search).trim().slice(0, 120);
       if (search) {
-        const regex = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-        filter.$or = [
-          { titleHe: regex },
-          { titleAr: regex },
-          { title: regex },
-          { slug: regex },
-          { sku: regex },
-        ];
+        // Use $text search for title fields (index-backed via ProductTextIndex)
+        filter.$text = { $search: search };
+        useTextSearch = true;
+        
+        // Fallback regex for slug/sku only (not in text index)
+        // Skip regex if search < 3 chars to avoid expensive scans
+        if (search.length >= 3) {
+          const escapedSearch = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const slugSkuRegex = new RegExp(escapedSearch, "i");
+          // Note: We can't easily combine $text with $or in MongoDB.
+          // The $text search covers titles; slug/sku matches would need a separate query.
+          // For now, rely on $text for titles. Admins can use exact slug/sku filters separately.
+          // If exact slug/sku match is critical, we could run a parallel query and merge.
+          // Keeping it simple: $text handles the common case (title search).
+        }
       }
     }
 
     // Sorting
     let sortOption = { createdAt: -1 };
+    let useTextScore = false;
+    
     if (q.sortBy) {
+      // Explicit sortBy provided - use allowlist sort behavior
       const dir = q.sortDir === "asc" ? 1 : -1;
       sortOption = { [q.sortBy]: dir };
+    } else if (useTextSearch) {
+      // No explicit sortBy + text search: sort by relevance score
+      sortOption = { score: { $meta: "textScore" }, createdAt: -1 };
+      useTextScore = true;
     }
 
+    // Build query with optional textScore projection
+    let query = Product.find(filter);
+    if (useTextScore) {
+      // Project textScore for sorting by relevance
+      query = query.select({ score: { $meta: "textScore" } });
+    }
+    
     const [items, total] = await Promise.all([
-      Product.find(filter).sort(sortOption).skip(skip).limit(limit).lean(),
+      query.sort(sortOption).skip(skip).limit(limit).lean(),
       Product.countDocuments(filter),
     ]);
 
@@ -693,6 +751,9 @@ router.post(
   async (req, res) => {
     try {
       const b = req.validated.body;
+
+      // Validate category exists before creating product
+      await validateCategoryExists(b.categoryId);
 
       const variants = Array.isArray(b.variants)
         ? await applyCatalogValidationToVariants(
@@ -760,13 +821,18 @@ router.patch(
         return safeNotFound(res, "NOT_FOUND", "Product not found");
       }
 
-      const existing = await Product.findById(id);
-      if (!existing) {
+      const product = await Product.findById(id);
+      if (!product) {
         return safeNotFound(res, "NOT_FOUND", "Product not found");
       }
 
       const b = req.validated.body;
       const patch = filterPatchFields(b);
+
+      // Validate category exists if categoryId is being updated
+      if (patch.categoryId) {
+        await validateCategoryExists(patch.categoryId);
+      }
 
       // Sync legacy fields
       if (patch.titleHe && !patch.title) patch.title = patch.titleHe;
@@ -780,38 +846,24 @@ router.patch(
         patch.saleEndAt = patch.saleEndAt ? new Date(patch.saleEndAt) : null;
       }
 
-      // Handle minor units
-      if ("price" in patch) {
-        patch.priceMinor = toMinorSafe(patch.price);
-      }
-      if ("salePrice" in patch) {
-        patch.salePriceMinor = patch.salePrice != null ? toMinorSafe(patch.salePrice) : null;
-      }
+      // priceMinor / salePriceMinor are computed only by Product model pre-validate hooks
 
       // Validate salePrice against existing price if only salePrice is provided
       if ("salePrice" in patch && !("price" in patch)) {
-        const currentPrice = existing.price;
+        const currentPrice = product.price;
         if (patch.salePrice != null && !(Number(patch.salePrice) < Number(currentPrice))) {
           throw makeErr(400, "INVALID_SALE_PRICE", "salePrice must be less than price");
         }
       }
 
-      // Handle variants
-      if ("variants" in patch && Array.isArray(patch.variants)) {
-        patch.variants = await applyCatalogValidationToVariants(
-          patch.variants.map((v) => ({
-            ...v,
-            priceOverrideMinor: v?.priceOverride != null ? toMinorSafe(v.priceOverride) : null,
-          }))
-        );
-      }
+      // NOTE: variants and images are NOT allowed via generic PATCH
+      // Use dedicated endpoints: PUT /:id/variants, PATCH /:id/images
 
-      const item = await Product.findByIdAndUpdate(id, patch, { new: true, runValidators: true });
-      if (!item) {
-        return safeNotFound(res, "NOT_FOUND", "Product not found");
-      }
+      // Apply allowed fields using doc.set() to trigger model validators
+      product.set(patch);
+      await product.save();
 
-      return jsonRes(res, mapProductAdmin(item, req.lang));
+      return jsonRes(res, mapProductAdmin(product, req.lang));
     } catch (e) {
       return jsonErr(res, e);
     }
@@ -829,17 +881,58 @@ router.delete("/:id", async (req, res) => {
       return safeNotFound(res, "NOT_FOUND", "Product not found");
     }
 
-    const item = await Product.findByIdAndUpdate(
-      id,
-      { $set: { isDeleted: true, isActive: false, deletedAt: new Date() } },
-      { new: true }
-    );
-
-    if (!item) {
+    const product = await Product.findById(id);
+    if (!product) {
       return safeNotFound(res, "NOT_FOUND", "Product not found");
     }
 
-    return jsonRes(res, { deleted: true, id: item._id });
+    // Already deleted
+    if (product.isDeleted) {
+      return jsonRes(res, { deleted: true, id: product._id });
+    }
+
+    product.set({
+      isDeleted: true,
+      isActive: false,
+      deletedAt: new Date(),
+    });
+    await product.save();
+
+    return jsonRes(res, { deleted: true, id: product._id });
+  } catch (e) {
+    return jsonErr(res, e);
+  }
+});
+
+/* ============================
+   POST /api/admin/products/:id/restore
+============================ */
+
+router.post("/:id/restore", async (req, res) => {
+  try {
+    const id = String(req.params.id || "");
+    if (!isValidObjectId(id)) {
+      return safeNotFound(res, "NOT_FOUND", "Product not found");
+    }
+
+    const product = await Product.findById(id);
+    if (!product) {
+      return safeNotFound(res, "NOT_FOUND", "Product not found");
+    }
+
+    if (!product.isDeleted) {
+      // Not deleted, nothing to restore
+      return jsonRes(res, mapProductAdmin(product, req.lang));
+    }
+
+    product.set({
+      isDeleted: false,
+      deletedAt: null,
+      // Keep isActive false so admin must explicitly activate
+    });
+    await product.save();
+
+    return jsonRes(res, mapProductAdmin(product, req.lang));
   } catch (e) {
     return jsonErr(res, e);
   }

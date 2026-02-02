@@ -279,6 +279,17 @@ export const limitMediaUpload = createLimiter({
 });
 
 /**
+ * ✅ Rate limit for coupon validation endpoint
+ * Prevents coupon code enumeration attacks
+ */
+export const limitCouponValidate = createLimiter({
+  windowMs: 60_000,
+  limit: 30,
+  messageCode: "COUPON_VALIDATE_RATE_LIMITED",
+  messageText: "Too many coupon validation requests. Please slow down.",
+});
+
+/**
  * Create Redis-backed limiters dynamically after init.
  * Use this factory after calling initRateLimiters() for limiters that need Redis.
  */

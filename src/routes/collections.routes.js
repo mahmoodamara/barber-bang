@@ -1,5 +1,5 @@
 // src/routes/collections.routes.js
-// Smart Collections APIs for Israeli e-commerce market
+// Smart Collections APIs for Israeli e-commerce market (hardened + more consistent)
 
 import express from "express";
 import mongoose from "mongoose";
@@ -17,9 +17,36 @@ const router = express.Router();
    Helpers
 ============================ */
 
-function isValidObjectId(id) {
-  return mongoose.Types.ObjectId.isValid(String(id || ""));
+const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(String(id || ""));
+const toObjectId = (id) => new mongoose.Types.ObjectId(String(id));
+
+function makeErr(statusCode, code, message, details) {
+  const err = new Error(message);
+  err.statusCode = statusCode;
+  err.code = code;
+  if (details !== undefined) err.details = details;
+  return err;
 }
+
+function jsonErr(res, e) {
+  return sendError(
+    res,
+    e?.statusCode || 500,
+    e?.code || "INTERNAL_ERROR",
+    e?.message || "Unexpected error",
+    e?.details ? { details: e.details } : undefined
+  );
+}
+
+const asyncHandler =
+  (fn) =>
+  async (req, res) => {
+    try {
+      await fn(req, res);
+    } catch (e) {
+      return jsonErr(res, e);
+    }
+  };
 
 function isSaleActiveByPrice(p, now = new Date()) {
   if (p?.salePrice == null) return false;
@@ -29,35 +56,41 @@ function isSaleActiveByPrice(p, now = new Date()) {
   return true;
 }
 
+// Safer money to minor (always int >=0)
 function toMinorSafe(major) {
-  const n = Number(major || 0);
+  const n = Number(major);
   if (!Number.isFinite(n)) return 0;
   return Math.max(0, Math.round((n + Number.EPSILON) * 100));
 }
 
 function mapProductImage(img, lang) {
+  const alt =
+    lang === "ar"
+      ? String(img?.altAr || img?.altHe || "")
+      : String(img?.altHe || img?.altAr || "");
+
   return {
     id: img?._id ? String(img._id) : null,
-    url: img?.url || "",
-    secureUrl: img?.secureUrl || img?.url || "",
-    alt: lang === "ar" ? (img?.altAr || img?.altHe || "") : (img?.altHe || img?.altAr || ""),
+    url: String(img?.url || ""),
+    secureUrl: String(img?.secureUrl || img?.url || ""),
+    alt,
     isPrimary: Boolean(img?.isPrimary),
     sortOrder: Number(img?.sortOrder || 0),
   };
 }
 
 function getMainImage(p) {
-  if (Array.isArray(p.images) && p.images.length > 0) {
-    const primary = p.images.find((img) => img.isPrimary);
-    if (primary) {
-      return primary.secureUrl || primary.url || p.imageUrl || "";
-    }
-    const first = p.images[0];
-    return first?.secureUrl || first?.url || p.imageUrl || "";
-  }
-  return p.imageUrl || "";
+  const fallback = String(p?.imageUrl || "");
+  if (!Array.isArray(p?.images) || p.images.length === 0) return fallback;
+
+  const primary = p.images.find((img) => img?.isPrimary);
+  const pick = primary || p.images[0];
+  return String(pick?.secureUrl || pick?.url || fallback);
 }
 
+/**
+ * Public collection product DTO (avoid leaking internal raw stats object)
+ */
 function mapCollectionProduct(p, lang, now = new Date()) {
   const onSale = isSaleActiveByPrice(p, now);
   const images = Array.isArray(p.images) ? p.images.map((img) => mapProductImage(img, lang)) : [];
@@ -76,13 +109,13 @@ function mapCollectionProduct(p, lang, now = new Date()) {
     stock: Number(p.stock || 0),
     categoryId: p.categoryId || null,
 
-    imageUrl: p.imageUrl || "",
+    imageUrl: String(p.imageUrl || ""),
     mainImage: getMainImage(p),
     images,
 
     isActive: Boolean(p.isActive),
-    brand: p.brand || "",
-    slug: p.slug || "",
+    brand: String(p.brand || ""),
+    slug: String(p.slug || ""),
 
     sale: onSale
       ? {
@@ -94,7 +127,7 @@ function mapCollectionProduct(p, lang, now = new Date()) {
         }
       : null,
 
-    // Collection-specific metadata (do not expose internal stats)
+    // curated exposed metrics (not raw internal stats object)
     stats: null,
     avgRating: p.avgRating ?? null,
     reviewCount: p.reviewCount ?? null,
@@ -105,103 +138,106 @@ function mapCollectionProduct(p, lang, now = new Date()) {
 
 /* ============================
    Query Schema (shared)
+   - Strict allowlist (no passthrough)
+   - Coerce numbers for safer parsing
 ============================ */
 
 const collectionQuerySchema = z.object({
   query: z
     .object({
-      limit: z.string().regex(/^\d+$/).optional(),
+      limit: z.coerce.number().int().min(1).max(50).optional(),
       categoryId: z.string().optional(),
       lang: z.enum(["he", "ar"]).optional(),
     })
-    .passthrough()
+    .strict()
     .optional(),
 });
 
 function parseCollectionQuery(req) {
-  const q = req.validated?.query || req.query || {};
-  const limit = Math.min(50, Math.max(1, Number(q.limit || 12)));
-  const categoryId = String(q.categoryId || "").trim();
+  const q = req.validated?.query || {};
+  const limit = q.limit ?? 12;
+
+  const categoryIdRaw = String(q.categoryId || "").trim();
+  const categoryId = categoryIdRaw && isValidObjectId(categoryIdRaw) ? categoryIdRaw : "";
+
   return { limit, categoryId };
 }
 
 function buildBaseFilter(categoryId) {
   const filter = { isActive: true, isDeleted: { $ne: true } };
-  if (categoryId && isValidObjectId(categoryId)) {
-    filter.categoryId = new mongoose.Types.ObjectId(categoryId);
+  if (categoryId) {
+    filter.categoryId = toObjectId(categoryId);
   }
   return filter;
 }
 
+function setPublicCache(res, seconds) {
+  // Add stale-while-revalidate to smooth traffic spikes (CDN-friendly)
+  res.set("Cache-Control", `public, max-age=${seconds}, stale-while-revalidate=60`);
+}
+
 /* ============================
-   GET /api/v1/collections/best-sellers
-   Rank by units sold from paid/confirmed orders (last 30 days)
+   Product projection (reduce payload + improve perf)
 ============================ */
 
-router.get("/best-sellers", validate(collectionQuerySchema), async (req, res) => {
-  try {
+const PRODUCT_PUBLIC_SELECT =
+  "_id title titleHe titleAr price salePrice saleStartAt saleEndAt discountPercent stock categoryId imageUrl images isActive brand slug avgRating reviewCount unitsSold trendScore salesScore ratingScore finalRankScore stats";
+
+/* ============================
+   GET /api/v1/collections/best-sellers
+   Rank by Product.salesScore (precomputed)
+============================ */
+
+router.get(
+  "/best-sellers",
+  validate(collectionQuerySchema),
+  asyncHandler(async (req, res) => {
     const { limit, categoryId } = parseCollectionQuery(req);
     const now = new Date();
 
     const baseFilter = buildBaseFilter(categoryId);
+
     const products = await Product.find(baseFilter)
+      .select(PRODUCT_PUBLIC_SELECT)
       .sort({ salesScore: -1, finalRankScore: -1, createdAt: -1 })
       .limit(limit)
       .lean();
 
     const items = products.map((p) => mapCollectionProduct(p, req.lang, now));
 
-    res.set("Cache-Control", "public, max-age=300"); // 5 min cache
+    setPublicCache(res, 300);
     return sendOk(res, { items });
-  } catch (e) {
-    return sendError(res, 500, "INTERNAL_ERROR", e.message || "Failed to fetch best sellers");
-  }
-});
+  })
+);
 
 /* ============================
    GET /api/v1/collections/trending
-   Compare sales last 7 days vs previous 30 days baseline
+   Compare last 7 days vs previous 30->7 baseline
+   - Uses allowlisted statuses
+   - Reduces DB load by fetching only needed products
 ============================ */
 
-router.get("/trending", validate(collectionQuerySchema), async (req, res) => {
-  try {
+const TREND_STATUSES = ["paid", "payment_received", "stock_confirmed", "confirmed", "shipped", "delivered"];
+
+router.get(
+  "/trending",
+  validate(collectionQuerySchema),
+  asyncHandler(async (req, res) => {
     const { limit, categoryId } = parseCollectionQuery(req);
     const now = new Date();
     const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
     const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
 
-    // Get recent sales (last 7 days)
     const recentPipeline = [
-      {
-        $match: {
-          status: { $in: ["paid", "payment_received", "stock_confirmed", "confirmed", "shipped", "delivered"] },
-          createdAt: { $gte: sevenDaysAgo },
-        },
-      },
+      { $match: { status: { $in: TREND_STATUSES }, createdAt: { $gte: sevenDaysAgo } } },
       { $unwind: "$items" },
-      {
-        $group: {
-          _id: "$items.productId",
-          recentSales: { $sum: "$items.qty" },
-        },
-      },
+      { $group: { _id: "$items.productId", recentSales: { $sum: "$items.qty" } } },
     ];
 
-    // Get baseline sales (30 days, excluding last 7)
     const baselinePipeline = [
-      {
-        $match: {
-          status: { $in: ["paid", "payment_received", "stock_confirmed", "confirmed", "shipped", "delivered"] },
-          createdAt: { $gte: thirtyDaysAgo, $lt: sevenDaysAgo },
-        },
-      },
+      { $match: { status: { $in: TREND_STATUSES }, createdAt: { $gte: thirtyDaysAgo, $lt: sevenDaysAgo } } },
       { $unwind: "$items" },
-      {
-        $group: {
-          _id: "$items.productId",
-          baselineSales: { $sum: "$items.qty" },
-        },
-      },
+      { $group: { _id: "$items.productId", baselineSales: { $sum: "$items.qty" } } },
     ];
 
     const [recentData, baselineData] = await Promise.all([
@@ -209,25 +245,25 @@ router.get("/trending", validate(collectionQuerySchema), async (req, res) => {
       Order.aggregate(baselinePipeline),
     ]);
 
-    const recentMap = new Map(recentData.map((r) => [String(r._id), r.recentSales]));
-    const baselineMap = new Map(baselineData.map((b) => [String(b._id), b.baselineSales]));
+    const recentMap = new Map(recentData.map((r) => [String(r._id), Number(r.recentSales || 0)]));
+    const baselineMap = new Map(baselineData.map((b) => [String(b._id), Number(b.baselineSales || 0)]));
 
-    // Calculate trend scores
     const productIds = [...new Set([...recentMap.keys(), ...baselineMap.keys()])];
     if (!productIds.length) {
+      setPublicCache(res, 300);
       return sendOk(res, { items: [] });
     }
 
     const baseFilter = buildBaseFilter(categoryId);
-    baseFilter._id = { $in: productIds.map((id) => new mongoose.Types.ObjectId(id)) };
+    baseFilter._id = { $in: productIds.map((id) => toObjectId(id)) };
 
-    const products = await Product.find(baseFilter).lean();
+    const products = await Product.find(baseFilter).select(PRODUCT_PUBLIC_SELECT).lean();
 
-    // Score: (recent / (baseline / 4 + 1)) - higher means more trending
+    // Score: recent / (baseline/4 + 1)
     const scored = products.map((p) => {
       const recent = recentMap.get(String(p._id)) || 0;
       const baseline = baselineMap.get(String(p._id)) || 0;
-      const weeklyBaseline = baseline / 4; // Average weekly from 23 days
+      const weeklyBaseline = baseline / 4;
       const trendScore = recent / (weeklyBaseline + 1);
       return { ...p, trendScore, unitsSold: recent };
     });
@@ -239,45 +275,49 @@ router.get("/trending", validate(collectionQuerySchema), async (req, res) => {
 
     const items = sorted.map((p) => mapCollectionProduct(p, req.lang, now));
 
-    res.set("Cache-Control", "public, max-age=300");
+    setPublicCache(res, 300);
     return sendOk(res, { items });
-  } catch (e) {
-    return sendError(res, 500, "INTERNAL_ERROR", e.message || "Failed to fetch trending");
-  }
-});
+  })
+);
 
 /* ============================
    GET /api/v1/collections/top-rated
-   Rank by average rating (min 10 reviews threshold)
+   Rank by ratingScore with a reviewCount threshold (>= 10)
 ============================ */
 
-router.get("/top-rated", validate(collectionQuerySchema), async (req, res) => {
-  try {
+router.get(
+  "/top-rated",
+  validate(collectionQuerySchema),
+  asyncHandler(async (req, res) => {
     const { limit, categoryId } = parseCollectionQuery(req);
     const now = new Date();
 
     const baseFilter = buildBaseFilter(categoryId);
+    // Enforce threshold (comment in original claimed this)
+    baseFilter.reviewCount = { $gte: 10 };
+
     const products = await Product.find(baseFilter)
+      .select(PRODUCT_PUBLIC_SELECT)
       .sort({ ratingScore: -1, finalRankScore: -1, createdAt: -1 })
       .limit(limit)
       .lean();
 
     const items = products.map((p) => mapCollectionProduct(p, req.lang, now));
 
-    res.set("Cache-Control", "public, max-age=600"); // 10 min cache
+    setPublicCache(res, 600);
     return sendOk(res, { items });
-  } catch (e) {
-    return sendError(res, 500, "INTERNAL_ERROR", e.message || "Failed to fetch top rated");
-  }
-});
+  })
+);
 
 /* ============================
    GET /api/v1/collections/most-viewed
-   Rank by stats.views counter
+   Rank by stats.views
 ============================ */
 
-router.get("/most-viewed", validate(collectionQuerySchema), async (req, res) => {
-  try {
+router.get(
+  "/most-viewed",
+  validate(collectionQuerySchema),
+  asyncHandler(async (req, res) => {
     const { limit, categoryId } = parseCollectionQuery(req);
     const now = new Date();
 
@@ -285,26 +325,27 @@ router.get("/most-viewed", validate(collectionQuerySchema), async (req, res) => 
     baseFilter["stats.views"] = { $gt: 0 };
 
     const products = await Product.find(baseFilter)
+      .select(PRODUCT_PUBLIC_SELECT)
       .sort({ "stats.views": -1 })
       .limit(limit)
       .lean();
 
     const items = products.map((p) => mapCollectionProduct(p, req.lang, now));
 
-    res.set("Cache-Control", "public, max-age=300");
+    setPublicCache(res, 300);
     return sendOk(res, { items });
-  } catch (e) {
-    return sendError(res, 500, "INTERNAL_ERROR", e.message || "Failed to fetch most viewed");
-  }
-});
+  })
+);
 
 /* ============================
    GET /api/v1/collections/most-wishlisted
-   Rank by stats.wishlisted counter
+   Rank by stats.wishlisted
 ============================ */
 
-router.get("/most-wishlisted", validate(collectionQuerySchema), async (req, res) => {
-  try {
+router.get(
+  "/most-wishlisted",
+  validate(collectionQuerySchema),
+  asyncHandler(async (req, res) => {
     const { limit, categoryId } = parseCollectionQuery(req);
     const now = new Date();
 
@@ -312,17 +353,16 @@ router.get("/most-wishlisted", validate(collectionQuerySchema), async (req, res)
     baseFilter["stats.wishlisted"] = { $gt: 0 };
 
     const products = await Product.find(baseFilter)
+      .select(PRODUCT_PUBLIC_SELECT)
       .sort({ "stats.wishlisted": -1 })
       .limit(limit)
       .lean();
 
     const items = products.map((p) => mapCollectionProduct(p, req.lang, now));
 
-    res.set("Cache-Control", "public, max-age=300");
+    setPublicCache(res, 300);
     return sendOk(res, { items });
-  } catch (e) {
-    return sendError(res, 500, "INTERNAL_ERROR", e.message || "Failed to fetch most wishlisted");
-  }
-});
+  })
+);
 
 export default router;

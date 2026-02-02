@@ -21,6 +21,7 @@ const categorySchema = new mongoose.Schema(
     // Visibility + ordering
     isActive: { type: Boolean, default: true },
     sortOrder: { type: Number, default: 0 },
+    parentId: { type: mongoose.Schema.Types.ObjectId, ref: "Category", default: null, index: true },
 
     // Descriptions (bilingual)
     descriptionHe: { type: String, default: "", trim: true, maxlength: 500 },

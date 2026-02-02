@@ -1,6 +1,9 @@
 // src/app.js
 
+import { createRequire } from "node:module";
 import express from "express";
+
+const require = createRequire(import.meta.url);
 import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
@@ -21,6 +24,8 @@ import {
 import authRoutes from "./routes/auth.routes.js";
 import categoriesRoutes from "./routes/categories.routes.js";
 import productsRoutes from "./routes/products.routes.js";
+import collectionsRoutes from "./routes/collections.routes.js";
+
 import rankingRoutes from "./routes/ranking.routes.js";
 import homeRoutes from "./routes/home.routes.js";
 import cartRoutes from "./routes/cart.routes.js";
@@ -30,34 +35,20 @@ import offersRoutes from "./routes/offers.routes.js";
 import checkoutRoutes from "./routes/checkout.routes.js";
 import ordersRoutes from "./routes/orders.routes.js";
 import stripeWebhookRoutes from "./routes/stripe.webhook.routes.js";
-import adminRoutes from "./routes/admin.routes.js";
+import adminIndexRouter from "./routes/admin.index.js";
 import healthRoutes from "./routes/health.routes.js";
 import returnsRoutes from "./routes/returns.routes.js";
-import adminReturnsRoutes from "./routes/admin.returns.routes.js";
 import productAttributesRoutes from "./routes/product-attributes.routes.js";
-import adminProductAttributesRoutes from "./routes/admin.product-attributes.routes.js";
 
-// ✅ NEW
 import wishlistRoutes from "./routes/wishlist.routes.js";
 import reviewsRoutes from "./routes/reviews.routes.js";
 import contentRoutes from "./routes/content.routes.js";
-
-// ✅ P0 Admin Modules
-import adminProductsRoutes from "./routes/admin.products.routes.js";
-import adminOrdersRoutes from "./routes/admin.orders.routes.js";
-import adminAuditRoutes from "./routes/admin.audit.routes.js";
-import adminUsersRoutes from "./routes/admin.users.routes.js";
-import adminContentRoutes from "./routes/admin.content.routes.js";
-import adminSettingsRoutes from "./routes/admin.settings.routes.js";
-import adminHomeLayoutRoutes from "./routes/admin.home-layout.routes.js";
-import adminMediaRoutes from "./routes/admin.media.routes.js";
-import adminReviewsRoutes from "./routes/admin.reviews.routes.js"; // ✅ NEW
-import adminDashboardRoutes from "./routes/admin.dashboard.routes.js";
-import adminCategoriesRoutes from "./routes/admin.categories.routes.js";
-import adminStockReservationsRoutes from "./routes/admin.stock-reservations.routes.js";
+import settingsRoutes from "./routes/settings.routes.js";
 
 import { errorHandler, notFound, getRequestId } from "./middleware/error.js";
-import { metricsMiddleware, getMetricsSnapshot } from "./middleware/metrics.js";
+import { getPrometheusMiddleware, getMetricsContent } from "./middleware/prometheus.js";
+import { log, reqLogger } from "./utils/logger.js";
+import { normalizePath } from "./utils/path.js";
 
 // ✅ Securing metrics (admin only in production)
 import { requireAuth, requireRole } from "./middleware/auth.js";
@@ -67,7 +58,9 @@ export const app = express();
 const isProd = process.env.NODE_ENV === "production";
 
 app.disable("x-powered-by");
-const trustProxyEnv = String(process.env.TRUST_PROXY || "").trim().toLowerCase();
+const trustProxyEnv = String(process.env.TRUST_PROXY || "")
+  .trim()
+  .toLowerCase();
 if (["", "0", "false", "off", "no"].includes(trustProxyEnv)) {
   app.set("trust proxy", false);
 } else if (["1", "true", "on", "yes"].includes(trustProxyEnv)) {
@@ -87,6 +80,62 @@ app.use((req, res, next) => {
   res.setHeader("x-request-id", req.requestId);
   next();
 });
+
+/**
+ * ✅ Structured logger per request (requestId, route, method)
+ */
+app.use((req, res, next) => {
+  req.log = reqLogger(req);
+  next();
+});
+
+/**
+ * ✅ Request completion log (method, canonical path, statusCode, requestId) for all requests
+ * - Single log entry per request (no duplicates)
+ * - Canonical path from req.originalUrl (query stripped, trailing slash normalized)
+ * - Uses requestId for correlation
+ */
+app.use((req, res, next) => {
+  // Mark start time for duration calculation
+  const startTime = Date.now();
+
+  res.once("finish", () => {
+    const method = (req.method || "GET").toUpperCase();
+    const canonicalPath = normalizePath(req.originalUrl);
+    const statusCode = res.statusCode ?? 0;
+    const durationMs = Date.now() - startTime;
+
+    // Single structured log entry with all relevant fields
+    req.log.info({
+      statusCode,
+      durationMs,
+      contentLength: res.get("content-length") || 0,
+    }, `${method} ${canonicalPath}`);
+  });
+  next();
+});
+
+/**
+ * ✅ Optional: correlate requestId with OpenTelemetry span (when ENABLE_TRACING=true)
+ */
+app.use((req, res, next) => {
+  try {
+    const { trace } = require("@opentelemetry/api");
+    const span = trace.getActiveSpan();
+    if (span && req.requestId) span.setAttribute("request.id", req.requestId);
+  } catch {
+    // @opentelemetry/api not installed or tracing disabled
+  }
+  next();
+});
+
+/**
+ * ✅ Prometheus metrics (early so webhook and all routes are timed)
+ */
+const metricsEnabled = String(process.env.ENABLE_METRICS || "false").toLowerCase() === "true";
+if (metricsEnabled) {
+  app.use(getPrometheusMiddleware());
+}
 
 /**
  * ✅ Normalize response envelope (add success when missing)
@@ -114,7 +163,7 @@ app.use((req, res, next) => {
 app.use(
   helmet({
     // Keep defaults; CSP is applied separately in production.
-  })
+  }),
 );
 
 /**
@@ -146,7 +195,7 @@ if (isProd) {
         // Fonts
         "font-src": ["'self'", "https:", "data:"],
       },
-    })
+    }),
   );
 }
 
@@ -154,12 +203,17 @@ if (isProd) {
  * ✅ CORS
  * Supports comma-separated origins in env:
  * CORS_ORIGIN="https://site.com,http://localhost:5173"
+ * In production, if CORS_ORIGIN is empty, defaults to frontend URL below.
  */
+const DEFAULT_FRONTEND_ORIGIN = "https://barber-bang.netlify.app";
 const corsOriginEnv = String(process.env.CORS_ORIGIN || "").trim();
-const corsOriginList = corsOriginEnv
+let corsOriginList = corsOriginEnv
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
+if (isProd && corsOriginList.length === 0) {
+  corsOriginList = [DEFAULT_FRONTEND_ORIGIN];
+}
 
 const localhostOrigins = new Set([
   "http://localhost:5173",
@@ -170,9 +224,7 @@ const localhostOrigins = new Set([
 ]);
 
 // Production frontend origins (always allowed)
-const productionOrigins = new Set([
-  "https://barber-bang.netlify.app",
-]);
+const productionOrigins = new Set(["http://localhost:8080"]);
 
 const allowedOrigins = new Set(corsOriginList);
 // Always allow production frontend origins
@@ -210,13 +262,15 @@ app.use(
     windowMs: 60_000,
     limit: 200,
     keyGenerator: (req) => req.ip,
-  })
+  }),
 );
 
-if (!isProd) {
-  morgan.token("req-id", (req) => req.requestId || "-");
-  app.use(morgan(":method :url :status :res[content-length] - :response-time ms :req-id"));
-}
+// Morgan disabled - using single pino structured logger for request completion
+// This avoids duplicate log entries with the same method/route/requestId
+// if (!isProd) {
+//   morgan.token("req-id", (req) => req.requestId || "-");
+//   app.use(morgan(":method :url :status :res[content-length] - :response-time ms :req-id"));
+// }
 
 /**
  * Legacy /api prefix (backward compatible)
@@ -228,7 +282,7 @@ function legacyApiDeprecation(req, res, next) {
   res.setHeader("X-API-Deprecated", "true");
   if (!legacyApiWarned) {
     legacyApiWarned = true;
-    console.warn("[api] Legacy /api routes are deprecated. Use /api/v1.");
+    log.warn({ path: req.url }, "[api] Legacy /api routes are deprecated. Use /api/v1.");
   }
   return next();
 }
@@ -256,145 +310,73 @@ app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 app.use(
   mongoSanitize({
     replaceWith: "_",
-  })
+  }),
 );
 
 /**
- * ✅ Metrics
- * 🔒 In production: Admin only (requireAuth + requireRole("admin"))
- * ✅ In dev: open (for easy local debugging)
+ * ✅ API Router (Unified)
+ * Mounted at:
+ * 1. /api/v1 (Canonical)
+ * 2. /api    (Legacy/Alias)
  */
-const metricsEnabled = String(process.env.ENABLE_METRICS || "false").toLowerCase() === "true";
-if (metricsEnabled) {
-  app.use(metricsMiddleware());
+const apiRouter = express.Router();
 
-  if (isProd) {
-    app.get("/api/v1/metrics", requireAuth(), requireRole("admin"), (_req, res) => {
-      return res.json({ ok: true, success: true, data: getMetricsSnapshot() });
-    });
-  } else {
-    app.get("/api/v1/metrics", (_req, res) => {
-      return res.json({ ok: true, success: true, data: getMetricsSnapshot() });
-    });
-  }
+// 1. Webhooks (Raw) - Already handled before json/urlencoded middleware
+// apiRouter.use("/stripe/webhook", stripeWebhookRoutes); // Handled at app-level
+
+// 2. Auth
+apiRouter.use("/auth", limitAuth, authRoutes);
+
+// 3. User features
+apiRouter.use("/home", homeRoutes);
+apiRouter.use("/categories", categoriesRoutes);
+apiRouter.use("/products", productsRoutes);
+apiRouter.use("/products", rankingRoutes);
+apiRouter.use("/cart", cartRoutes);
+apiRouter.use("/shipping", shippingRoutes);
+apiRouter.use("/coupons", couponsRoutes);
+apiRouter.use("/offers", offersRoutes);
+apiRouter.use("/checkout/quote", limitCheckoutQuote); // Rate limit
+apiRouter.use("/checkout/cod", limitCheckoutCreate); // Rate limit
+apiRouter.use("/checkout/stripe", limitCheckoutCreate); // Rate limit
+apiRouter.use("/checkout", checkoutRoutes);
+apiRouter.use("/orders/track", limitTrackOrder, ordersRoutes); // Specific limit for track
+apiRouter.use("/orders", ordersRoutes);
+apiRouter.use("/returns", returnsRoutes);
+apiRouter.use("/product-attributes", productAttributesRoutes);
+apiRouter.use("/wishlist", requireAuth(), wishlistRoutes);
+apiRouter.use("/reviews", requireAuth(), reviewsRoutes);
+apiRouter.use("/content", contentRoutes);
+apiRouter.use("/collections", collectionsRoutes);
+apiRouter.use("/settings", settingsRoutes);
+
+// 4. Admin (Protected)
+apiRouter.use("/admin", limitAdmin, adminIndexRouter);
+
+// 5. Health (also mounted at root /health)
+apiRouter.use("/health", healthRoutes);
+
+// 6. Metrics (if enabled)
+if (metricsEnabled) {
+  const metricsHandler = async (_req, res) => {
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    const content = await getMetricsContent();
+    return res.send(content);
+  };
+
+  const metricsAuth = isProd ? [requireAuth(), requireRole("admin")] : [];
+
+  apiRouter.get("/metrics", ...metricsAuth, metricsHandler);
+
+  // QA hits GET /metrics at root (same handler + auth)
+  app.get("/metrics", ...metricsAuth, metricsHandler);
 }
 
-/**
- * ✅ Health endpoints
- * Keep both /health + /api/v1/health/* for Render monitors
- */
-app.get("/health", (_req, res) => {
-  res.json({ ok: true, success: true, data: { service: "simple-shop-v2" } });
-});
+// ✅ Mount Canonical (/api/v1)
+app.use("/api/v1", apiRouter);
 
-app.use("/api/v1/health", healthRoutes);
-
-/**
- * ✅ Lang middleware (he default, supports he/ar)
- * Applied globally to all API routes after /health
- */
-app.use(langMiddleware);
-
-/**
- * ✅ Maintenance mode check
- * Blocks non-admin routes with 503 if SiteSettings.maintenanceMode.enabled = true
- */
-app.use(maintenanceMiddleware());
-
-/**
- * ✅ Route-level rate limits (tight for sensitive endpoints)
- * Apply on BOTH /api and /api/v1 for compatibility.
- */
-app.use("/api/auth", limitAuth);
-app.use("/api/orders/track", limitTrackOrder);
-app.use("/api/checkout/quote", limitCheckoutQuote);
-app.use("/api/checkout/cod", limitCheckoutCreate);
-app.use("/api/checkout/stripe", limitCheckoutCreate);
-app.use("/api/admin", limitAdmin);
-
-app.use("/api/v1/auth", limitAuth);
-app.use("/api/v1/orders/track", limitTrackOrder);
-app.use("/api/v1/checkout/quote", limitCheckoutQuote);
-app.use("/api/v1/checkout/cod", limitCheckoutCreate);
-app.use("/api/v1/checkout/stripe", limitCheckoutCreate);
-app.use("/api/v1/admin", limitAdmin);
-
-/**
- * ✅ API v1 (CANONICAL)
- */
-app.use("/api/v1/auth", authRoutes);
-app.use("/api/v1/categories", categoriesRoutes);
-app.use("/api/v1/products", rankingRoutes);
-app.use("/api/v1/products", productsRoutes);
-app.use("/api/v1/home", homeRoutes);
-app.use("/api/v1/cart", cartRoutes);
-app.use("/api/v1/shipping", shippingRoutes);
-app.use("/api/v1/coupons", couponsRoutes);
-app.use("/api/v1/offers", offersRoutes);
-app.use("/api/v1/checkout", checkoutRoutes);
-app.use("/api/v1/orders", ordersRoutes);
-app.use("/api/v1/returns", returnsRoutes);
-app.use("/api/v1/product-attributes", productAttributesRoutes);
-
-// ✅ NEW
-app.use("/api/v1/wishlist", wishlistRoutes);
-app.use("/api/v1/reviews", reviewsRoutes);
-app.use("/api/v1/content", contentRoutes);
-
-// Admin-only
-app.use("/api/v1/admin/returns", adminReturnsRoutes);
-app.use("/api/v1/admin/orders", adminOrdersRoutes);
-app.use("/api/v1/admin/audit-logs", adminAuditRoutes);
-app.use("/api/v1/admin/users", adminUsersRoutes);
-app.use("/api/v1/admin/content", adminContentRoutes);
-app.use("/api/v1/admin/settings", adminSettingsRoutes);
-app.use("/api/v1/admin/home-layout", adminHomeLayoutRoutes);
-app.use("/api/v1/admin/media", adminMediaRoutes);
-app.use("/api/v1/admin/product-attributes", adminProductAttributesRoutes);
-app.use("/api/v1/admin/reviews", adminReviewsRoutes); // ✅ NEW
-app.use("/api/v1/admin/dashboard", adminDashboardRoutes);
-app.use("/api/v1/admin/categories", adminCategoriesRoutes);
-app.use("/api/v1/admin/stock-reservations", adminStockReservationsRoutes);
-app.use("/api/v1/admin/products", adminProductsRoutes);
-app.use("/api/v1/admin", adminRoutes);
-
-/**
- * ✅ Backward-compatible non-versioned routes (optional but recommended)
- * This prevents breaking older frontend calls that still use /api/*.
- */
-app.use("/api/auth", authRoutes);
-app.use("/api/categories", categoriesRoutes);
-app.use("/api/products", rankingRoutes);
-app.use("/api/products", productsRoutes);
-app.use("/api/home", homeRoutes);
-app.use("/api/cart", cartRoutes);
-app.use("/api/shipping", shippingRoutes);
-app.use("/api/coupons", couponsRoutes);
-app.use("/api/offers", offersRoutes);
-app.use("/api/checkout", checkoutRoutes);
-app.use("/api/orders", ordersRoutes);
-app.use("/api/returns", returnsRoutes);
-app.use("/api/product-attributes", productAttributesRoutes);
-
-app.use("/api/wishlist", wishlistRoutes);
-app.use("/api/reviews", reviewsRoutes);
-app.use("/api/content", contentRoutes);
-
-app.use("/api/admin/returns", adminReturnsRoutes);
-app.use("/api/admin/product-attributes", adminProductAttributesRoutes);
-app.use("/api/admin/products", adminProductsRoutes);
-app.use("/api/admin/orders", adminOrdersRoutes);
-app.use("/api/admin/audit-logs", adminAuditRoutes);
-app.use("/api/admin/users", adminUsersRoutes);
-app.use("/api/admin/content", adminContentRoutes);
-app.use("/api/admin/settings", adminSettingsRoutes);
-app.use("/api/admin/home-layout", adminHomeLayoutRoutes);
-app.use("/api/admin/media", adminMediaRoutes);
-app.use("/api/admin/reviews", adminReviewsRoutes); // ✅ NEW
-app.use("/api/admin/dashboard", adminDashboardRoutes);
-app.use("/api/admin/categories", adminCategoriesRoutes);
-app.use("/api/admin/stock-reservations", adminStockReservationsRoutes);
-app.use("/api/admin", adminRoutes);
+// ✅ Mount Legacy (/api) with deprecation warning
+app.use("/api", legacyApiDeprecation, apiRouter);
 
 /**
  * Global not-found + error handling

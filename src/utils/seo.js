@@ -8,7 +8,7 @@ export const STORE_BASE_URL = (
   process.env.STORE_BASE_URL ||
   process.env.FRONTEND_URL ||
   process.env.CLIENT_URL ||
-  "https://example.com"
+  "https://barber-bang.netlify.app"
 ).replace(/\/+$/, "");
 
 export const STORE_OG_IMAGE_URL =

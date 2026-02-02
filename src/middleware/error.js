@@ -1,7 +1,12 @@
 // src/middleware/error.js
 
 import crypto from "crypto";
+import { createRequire } from "node:module";
 import { maskPII } from "../utils/maskPII.js";
+import { log } from "../utils/logger.js";
+import { normalizePath } from "../utils/path.js";
+
+const require = createRequire(import.meta.url);
 
 function makeRequestId(req) {
   // Prefer requestId set by app middleware
@@ -64,7 +69,7 @@ export function errorHandler(err, req, res, _next) {
   let status = err?.statusCode || err?.status || 500;
   let code = err?.code || "SERVER_ERROR";
   let message = err?.message || "Unexpected server error";
-  let details = undefined;
+  let details = err?.details || undefined;
 
   /**
    * ✅ Zod validation errors
@@ -126,8 +131,8 @@ export function errorHandler(err, req, res, _next) {
 
   const safeHeaders = maskPII(req.headers || {});
   const logPayload = {
-    level: "error",
     requestId,
+    route: normalizePath(req.originalUrl || req.url || ""),
     path: req.originalUrl,
     method: req.method,
     status,
@@ -139,10 +144,15 @@ export function errorHandler(err, req, res, _next) {
     stack: process.env.NODE_ENV !== "production" ? err?.stack : undefined,
   };
 
-  if (process.env.NODE_ENV === "production") {
-    console.error(JSON.stringify(logPayload));
-  } else {
-    console.error("[error]", logPayload);
+  log.error(logPayload, message);
+
+  try {
+    const Sentry = require("@sentry/node");
+    Sentry.captureException(err, {
+      extra: { requestId, code, route: normalizePath(req.originalUrl || req.url || "") },
+    });
+  } catch {
+    // Sentry optional
   }
 
   // Response envelope

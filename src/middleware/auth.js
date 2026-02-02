@@ -1,5 +1,6 @@
 import { verifyToken } from "../utils/jwt.js";
 import { User } from "../models/User.js";
+import { PERMISSIONS } from "../config/permissions.js";
 import { getRequestId } from "./error.js";
 
 function authError(req, code, message) {
@@ -139,19 +140,7 @@ export function requireRole(...roles) {
   };
 }
 
-/**
- * Staff Permissions:
- * - ORDERS_WRITE: Create, update, cancel orders
- * - PRODUCTS_WRITE: Create, update, delete products
- * - PROMOS_WRITE: Manage coupons, campaigns, offers, gifts
- * - SETTINGS_WRITE: Manage site settings, delivery areas, pickup points
- */
-export const PERMISSIONS = {
-  ORDERS_WRITE: "ORDERS_WRITE",
-  PRODUCTS_WRITE: "PRODUCTS_WRITE",
-  PROMOS_WRITE: "PROMOS_WRITE",
-  SETTINGS_WRITE: "SETTINGS_WRITE",
-};
+export { PERMISSIONS };
 
 /**
  * Check if user has specific permission(s).

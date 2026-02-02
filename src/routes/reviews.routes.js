@@ -4,6 +4,7 @@ import { z } from "zod";
 import mongoose from "mongoose";
 
 import { Review } from "../models/Review.js";
+import { Product } from "../models/Product.js";
 import { requireAuth } from "../middleware/auth.js";
 import { validate } from "../middleware/validate.js";
 import { getRequestId } from "../middleware/error.js";
@@ -37,10 +38,67 @@ const objectIdSchema = z
   .min(1)
   .refine((v) => isValidObjectId(v), { message: "Invalid id" });
 
+const createSchema = z.object({
+  body: z.object({
+    productId: objectIdSchema,
+    rating: z.number().int().min(1).max(5),
+    content: z.string().max(600).optional(),
+    comment: z.string().max(600).optional(),
+  }),
+});
+
 const deleteSchema = z.object({
   params: z.object({
     id: objectIdSchema,
   }),
+});
+
+/**
+ * POST /api/v1/reviews
+ * Protected (requireAuth at mount).
+ * Body: { productId, rating, content? | comment? }
+ */
+router.post("/", validate(createSchema), async (req, res) => {
+  try {
+    const { productId, rating, content, comment } = req.validated.body;
+    const text = (comment ?? content ?? "").trim().slice(0, 600);
+
+    const product = await Product.findOne({
+      _id: productId,
+      isActive: true,
+      isDeleted: { $ne: true },
+    })
+      .select("_id")
+      .lean();
+    if (!product) {
+      return res.status(404).json(errorPayload(req, "NOT_FOUND", "Product not found"));
+    }
+
+    const updated = await Review.findOneAndUpdate(
+      { productId, userId: req.user._id },
+      { $set: { rating, comment: text } },
+      { new: true, upsert: true, setDefaultsOnInsert: true }
+    ).lean();
+
+    await recalculateProductRatingStats(updated.productId).catch(() => {});
+
+    return res.status(201).json(
+      okPayload({
+        id: updated._id,
+        _id: updated._id,
+        productId: updated.productId,
+        userId: updated.userId,
+        rating: updated.rating,
+        comment: updated.comment || "",
+        createdAt: updated.createdAt,
+      })
+    );
+  } catch (e) {
+    if (e.code === 11000) {
+      return res.status(400).json(errorPayload(req, "DUPLICATE", "Review already exists"));
+    }
+    return res.status(500).json(errorPayload(req, "INTERNAL_ERROR", "Failed to create review"));
+  }
 });
 
 /**

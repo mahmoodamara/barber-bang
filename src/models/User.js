@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { PERMISSIONS } from "../config/permissions.js";
 
 const cartVariantSnapshotSchema = new mongoose.Schema(
   {
@@ -63,7 +64,7 @@ const userSchema = new mongoose.Schema(
     // Admin has all permissions by default; staff has only explicitly granted ones
     permissions: {
       type: [String],
-      enum: ["ORDERS_WRITE", "PRODUCTS_WRITE", "PROMOS_WRITE", "SETTINGS_WRITE"],
+      enum: Object.values(PERMISSIONS),
       default: [],
     },
 

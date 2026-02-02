@@ -3,20 +3,35 @@ import express from "express";
 import { z } from "zod";
 import mongoose from "mongoose";
 
-import { requireAuth, requirePermission, PERMISSIONS } from "../middleware/auth.js";
+import {
+  requireAuth,
+  requirePermission,
+  requireAnyPermission,
+  PERMISSIONS,
+} from "../middleware/auth.js";
+import { auditAdmin } from "../middleware/audit.js";
 import { validate } from "../middleware/validate.js";
+import { getRequestId } from "../middleware/error.js";
 
 import { ReturnRequest } from "../models/ReturnRequest.js";
 import { Order } from "../models/Order.js";
 
 import { refundStripeOrder } from "../services/refunds.service.js";
 import { computeReturnRefundAmountMajor } from "../utils/returns.policy.js";
-import { getRequestId } from "../middleware/error.js";
 import { sendOk, sendError } from "../utils/response.js";
 
 const router = express.Router();
+
+/**
+ * Router gate:
+ * - Must be authenticated
+ * - Must have at least one of ORDERS_WRITE or REFUNDS_WRITE to access any returns route
+ * - Per-endpoint checks remain (list/details/patch need ORDERS_WRITE; refund needs REFUNDS_WRITE)
+ * - Audit all actions
+ */
 router.use(requireAuth());
-router.use(requirePermission(PERMISSIONS.ORDERS_WRITE));
+router.use(requireAnyPermission(PERMISSIONS.ORDERS_WRITE, PERMISSIONS.REFUNDS_WRITE));
+router.use(auditAdmin());
 
 /* =========================
    Helpers
@@ -34,34 +49,55 @@ function makeErr(statusCode, code, message, extra = {}) {
   return err;
 }
 
-function jsonErr(res, e) {
-  return sendError(
-    res,
-    e.statusCode || 500,
-    e.code || "INTERNAL_ERROR",
-    e.message || "Unexpected error"
-  );
+function jsonErr(req, res, e) {
+  return sendError(res, e.statusCode || 500, e.code || "INTERNAL_ERROR", e.message || "Unexpected error", {
+    requestId: getRequestId(req),
+    path: req.originalUrl || req.url || "",
+  });
 }
 
-function clampLimit(v, def = 200, max = 300) {
-  const n = Number(v || def);
+function safeNotFound(req, res, code = "NOT_FOUND", message = "Not found") {
+  return sendError(res, 404, code, message, {
+    requestId: getRequestId(req),
+    path: req.originalUrl || req.url || "",
+  });
+}
+
+function clampLimit(v, def = 50, max = 200) {
+  const n = Number(v ?? def);
   if (!Number.isFinite(n)) return def;
   return Math.max(1, Math.min(max, Math.floor(n)));
 }
 
-function pickIdempotencyKey(req) {
-  const raw = String(req.headers["idempotency-key"] || "").trim();
-  return raw ? raw.slice(0, 200) : "";
+function escapeRegex(s) {
+  return String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function makeSearchRegex(input, maxLen = 120) {
+  const safe = String(input || "").trim().slice(0, maxLen);
+  if (!safe) return null;
+  return new RegExp(escapeRegex(safe), "i");
 }
 
 /**
- * Order.return.status enum عندك:
+ * Generate deterministic idempotency key from return request + payment intent.
+ * Prevents duplicate refunds even if endpoint is called multiple times.
+ */
+function buildDeterministicIdempotencyKey(returnRequestId, paymentIntentId) {
+  const rrId = String(returnRequestId || "");
+  const piId = String(paymentIntentId || "");
+  if (!rrId || !piId) return "";
+  return `refund:return:${rrId}:${piId}`.slice(0, 200);
+}
+
+/**
+ * Order.return.status enum (legacy embedded):
  * ["none","requested","approved","rejected","received","refunded"]
  *
- * ReturnRequest.status عندك:
+ * ReturnRequest.status enum:
  * ["requested","approved","rejected","received","refund_pending","refunded","closed"]
  *
- * لذلك "refund_pending / closed" ما بنحطها بـ Order.return.status
+ * Therefore: refund_pending/closed do NOT map into Order.return.status.
  */
 function mapReturnRequestStatusToOrderReturnStatus(rrStatus) {
   const s = String(rrStatus || "");
@@ -73,8 +109,12 @@ function mapReturnRequestStatusToOrderReturnStatus(rrStatus) {
   return null; // refund_pending / closed
 }
 
+/**
+ * Best-effort sync ReturnRequest status into Order.return + potentially Order.status.
+ * Does not throw (caller can catch).
+ */
 async function syncOrderReturn(orderId, rr, adminNote = "") {
-  if (!orderId) return;
+  if (!orderId || !isValidObjectId(orderId)) return;
 
   const mapped = mapReturnRequestStatusToOrderReturnStatus(rr?.status);
   const patch = {};
@@ -83,18 +123,25 @@ async function syncOrderReturn(orderId, rr, adminNote = "") {
     patch["return.status"] = mapped;
     patch["return.processedAt"] = new Date();
 
-    // لما يكون في عملية ارجاع جارية
+    // If a return flow is active, set an order-level status marker
     if (["requested", "approved", "received"].includes(mapped)) {
       patch.status = "return_requested";
     }
   }
 
   if (adminNote) {
-    patch.internalNote = String(adminNote).slice(0, 800);
+    patch.internalNote = String(adminNote).trim().slice(0, 800);
   }
 
   if (!Object.keys(patch).length) return;
   await Order.updateOne({ _id: orderId }, { $set: patch });
+}
+
+/**
+ * Guarded number selection (allows 0).
+ */
+function isNumber(v) {
+  return typeof v === "number" && Number.isFinite(v);
 }
 
 /* =========================
@@ -102,44 +149,62 @@ async function syncOrderReturn(orderId, rr, adminNote = "") {
 ========================= */
 
 const listSchema = z.object({
-  query: z.object({
-    status: z
-      .enum(["requested", "approved", "rejected", "received", "refund_pending", "refunded", "closed"])
-      .optional(),
-    limit: z.string().optional(),
-    orderId: z.string().optional(),
-    userId: z.string().optional(),
-  }),
+  query: z
+    .object({
+      status: z
+        .enum(["requested", "approved", "rejected", "received", "refund_pending", "refunded", "closed"])
+        .optional(),
+      limit: z.string().regex(/^\d+$/).optional(),
+
+      orderId: z.string().optional(),
+      userId: z.string().optional(),
+
+      // Optional quick search (by orderId-like / phone / email snapshot if exists in rr)
+      q: z.string().max(120).optional(),
+    })
+    .strict()
+    .optional(),
+});
+
+const idParamSchema = z.object({
+  params: z.object({ id: z.string().min(1) }).strict(),
 });
 
 const patchSchema = z.object({
-  params: z.object({ id: z.string().min(1) }), // ReturnRequest ID
-  body: z.object({
-    action: z.enum(["approve", "reject", "mark_received", "close"]),
-    adminNote: z.string().max(800).optional(),
-  }),
+  params: z.object({ id: z.string().min(1) }).strict(), // ReturnRequest ID
+  body: z
+    .object({
+      action: z.enum(["approve", "reject", "mark_received", "close"]),
+      adminNote: z.string().max(800).optional(),
+    })
+    .strict(),
 });
 
 const refundSchema = z.object({
-  params: z.object({ id: z.string().min(1) }), // ReturnRequest ID
-  body: z.object({
-    // optional override
-    amount: z.number().min(0).optional(), // ILS major
-    includeShipping: z.boolean().optional(),
+  params: z.object({ id: z.string().min(1) }).strict(), // ReturnRequest ID
+  body: z
+    .object({
+      // optional override
+      amount: z.number().min(0).optional(), // ILS major
+      includeShipping: z.boolean().optional(),
 
-    // optional override items (for partial refund by selected products)
-    items: z
-      .array(
-        z.object({
-          productId: z.string().min(1),
-          qty: z.number().int().min(1).max(999),
-        })
-      )
-      .optional(),
+      // optional override items (partial refund by selected products)
+      items: z
+        .array(
+          z
+            .object({
+              productId: z.string().min(1),
+              qty: z.number().int().min(1).max(999),
+            })
+            .strict()
+        )
+        .max(200)
+        .optional(),
 
-    note: z.string().max(800).optional(),
-    reason: z.enum(["return", "customer_cancel", "out_of_stock", "fraud", "duplicate", "other"]).optional(),
-  }),
+      note: z.string().max(800).optional(),
+      reason: z.enum(["return", "customer_cancel", "out_of_stock", "fraud", "duplicate", "other"]).optional(),
+    })
+    .strict(),
 });
 
 /* =========================
@@ -147,55 +212,81 @@ const refundSchema = z.object({
 ========================= */
 
 /**
- * GET /api/v1/admin/returns?status=&limit=&orderId=&userId=
+ * GET /api/v1/admin/returns?status=&limit=&orderId=&userId=&q=
+ * Requires ORDERS_WRITE (list view)
  */
-router.get("/", validate(listSchema), async (req, res) => {
+router.get("/", requirePermission(PERMISSIONS.ORDERS_WRITE), validate(listSchema), async (req, res) => {
   try {
-    const { status, limit, orderId, userId } = req.validated.query || {};
-    const lim = clampLimit(limit, 200, 300);
+    const q = req.validated?.query || {};
+    const lim = clampLimit(q.limit, 50, 200);
 
     const filter = {};
-    if (status) filter.status = status;
 
-    if (orderId) {
-      if (!isValidObjectId(orderId)) throw makeErr(400, "INVALID_ID", "Invalid orderId");
-      filter.orderId = orderId;
+    if (q.status) filter.status = q.status;
+
+    if (q.orderId) {
+      if (!isValidObjectId(q.orderId)) throw makeErr(400, "INVALID_ID", "Invalid orderId");
+      filter.orderId = q.orderId;
     }
 
-    if (userId) {
-      if (!isValidObjectId(userId)) throw makeErr(400, "INVALID_ID", "Invalid userId");
-      filter.userId = userId;
+    if (q.userId) {
+      if (!isValidObjectId(q.userId)) throw makeErr(400, "INVALID_ID", "Invalid userId");
+      filter.userId = q.userId;
     }
 
-    const items = await ReturnRequest.find(filter).sort({ requestedAt: -1 }).limit(lim);
-    return sendOk(res, items);
+    // Optional q search across a small allowlist of fields (only if present in schema)
+    // NOTE: This stays conservative to avoid expensive regex across large fields.
+    if (q.q) {
+      const rx = makeSearchRegex(q.q);
+      if (rx) {
+        filter.$or = [
+          { orderId: isValidObjectId(q.q) ? q.q : undefined },
+          { phone: rx },
+          { email: rx },
+          { customerNote: rx },
+          { adminNote: rx },
+        ].filter(Boolean);
+      }
+    }
+
+    const items = await ReturnRequest.find(filter)
+      .sort({ requestedAt: -1 })
+      .limit(lim)
+      .select("_id userId orderId status reason requestedAt decidedAt receivedAt refundedAt refund adminNote phone email items")
+      .lean();
+
+    return sendOk(res, items, { limit: lim });
   } catch (e) {
-    return jsonErr(res, e);
+    return jsonErr(req, res, e);
   }
 });
 
 /**
  * GET /api/v1/admin/returns/:id
+ * Requires ORDERS_WRITE (details view)
  */
-router.get("/:id", async (req, res) => {
+router.get("/:id", requirePermission(PERMISSIONS.ORDERS_WRITE), validate(idParamSchema), async (req, res) => {
   try {
     const id = String(req.params.id || "");
-    if (!isValidObjectId(id)) throw makeErr(404, "NOT_FOUND", "Return request not found");
+    if (!isValidObjectId(id)) return safeNotFound(req, res, "NOT_FOUND", "Return request not found");
 
-    const item = await ReturnRequest.findById(id);
-    if (!item) throw makeErr(404, "NOT_FOUND", "Return request not found");
+    const item = await ReturnRequest.findById(id)
+      .select("_id userId orderId status reason requestedAt decidedAt receivedAt refundedAt refund adminNote phone email items customerNote")
+      .lean();
 
+    if (!item) return safeNotFound(req, res, "NOT_FOUND", "Return request not found");
     return sendOk(res, item);
   } catch (e) {
-    return jsonErr(res, e);
+    return jsonErr(req, res, e);
   }
 });
 
 /**
  * PATCH /api/v1/admin/returns/:id
  * approve / reject / mark_received / close
+ * Requires ORDERS_WRITE
  */
-router.patch("/:id", validate(patchSchema), async (req, res) => {
+router.patch("/:id", requirePermission(PERMISSIONS.ORDERS_WRITE), validate(patchSchema), async (req, res) => {
   try {
     const id = String(req.params.id || "");
     if (!isValidObjectId(id)) throw makeErr(400, "INVALID_ID", "Invalid return request id");
@@ -206,57 +297,46 @@ router.patch("/:id", validate(patchSchema), async (req, res) => {
     if (!rr) throw makeErr(404, "NOT_FOUND", "Return request not found");
 
     const cur = String(rr.status || "requested");
-
     const note = typeof adminNote === "string" ? adminNote.trim().slice(0, 800) : "";
-    const patch = {};
 
-    if (note) patch.adminNote = note;
+    if (note) rr.adminNote = note;
 
+    // Explicit state machine (clear rules)
     if (action === "approve") {
       if (cur !== "requested") throw makeErr(400, "INVALID_STATE", "Return must be in requested state");
-      patch.status = "approved";
-      patch.decidedAt = new Date();
-    }
-
-    if (action === "reject") {
+      rr.status = "approved";
+      rr.decidedAt = new Date();
+    } else if (action === "reject") {
       if (cur !== "requested") throw makeErr(400, "INVALID_STATE", "Return must be in requested state");
-      patch.status = "rejected";
-      patch.decidedAt = new Date();
-    }
-
-    if (action === "mark_received") {
+      rr.status = "rejected";
+      rr.decidedAt = new Date();
+    } else if (action === "mark_received") {
       if (!["approved", "requested"].includes(cur)) {
         throw makeErr(400, "INVALID_STATE", "Return must be approved/requested to mark received");
       }
-      patch.status = "received";
-      patch.receivedAt = new Date();
-    }
-
-    if (action === "close") {
+      rr.status = "received";
+      rr.receivedAt = new Date();
+    } else if (action === "close") {
       if (!["rejected", "refunded", "received", "approved"].includes(cur)) {
         throw makeErr(400, "INVALID_STATE", "Return must be approved/received/refunded/rejected to close");
       }
-      patch.status = "closed";
+      rr.status = "closed";
     }
 
-    const updated = await ReturnRequest.findByIdAndUpdate(id, { $set: patch }, { new: true });
+    await rr.save();
 
-    // ✅ Sync into Order.return (best effort)
+    // Best-effort sync into Order.return + order status
     try {
-      if (updated?.orderId) {
-        await syncOrderReturn(
-          updated.orderId,
-          updated,
-          note ? `Return(${action}): ${note}` : `Return(${action})`
-        );
+      if (rr.orderId) {
+        await syncOrderReturn(rr.orderId, rr, note ? `Return(${action}): ${note}` : `Return(${action})`);
       }
     } catch (syncErr) {
-      console.warn("[admin.returns] syncOrderReturn failed:", syncErr?.message || syncErr);
+      req.log?.warn?.({ err: String(syncErr?.message || syncErr) }, "[admin.returns] syncOrderReturn failed");
     }
 
-    return sendOk(res, updated);
+    return sendOk(res, rr);
   } catch (e) {
-    return jsonErr(res, e);
+    return jsonErr(req, res, e);
   }
 });
 
@@ -264,139 +344,137 @@ router.patch("/:id", validate(patchSchema), async (req, res) => {
  * POST /api/v1/admin/returns/:id/refund
  * Stripe refund linked to ReturnRequest
  *
- * ✅ uses:
- * - computeReturnRefundAmountMajor() from your returns.policy.js
- * - refundStripeOrder() from your refunds.service.js
+ * ✅ Requires REFUNDS_WRITE permission
+ * Uses deterministic idempotency key derived from returnRequestId + paymentIntentId.
  */
-router.post("/:id/refund", validate(refundSchema), async (req, res) => {
-  try {
-    const id = String(req.params.id || "");
-    if (!isValidObjectId(id)) throw makeErr(400, "INVALID_ID", "Invalid return request id");
+router.post(
+  "/:id/refund",
+  requirePermission(PERMISSIONS.REFUNDS_WRITE),
+  validate(refundSchema),
+  async (req, res) => {
+    try {
+      const id = String(req.params.id || "");
+      if (!isValidObjectId(id)) throw makeErr(400, "INVALID_ID", "Invalid return request id");
 
-    const idemKey = pickIdempotencyKey(req);
-    const { amount, includeShipping, items, note, reason } = req.validated.body;
+      const { amount, includeShipping, items, note, reason } = req.validated.body;
 
-    const rr = await ReturnRequest.findById(id);
-    if (!rr) throw makeErr(404, "NOT_FOUND", "Return request not found");
+      const rr = await ReturnRequest.findById(id);
+      if (!rr) throw makeErr(404, "NOT_FOUND", "Return request not found");
 
-    const order = await Order.findById(rr.orderId);
-    if (!order) throw makeErr(404, "ORDER_NOT_FOUND", "Order not found");
-
-    if (order.paymentMethod !== "stripe") {
-      throw makeErr(400, "REFUND_NOT_SUPPORTED", "Refunds are only supported for Stripe orders");
-    }
-
-    const paymentIntentId = String(order?.stripe?.paymentIntentId || "");
-    if (!paymentIntentId) throw makeErr(400, "MISSING_PAYMENT_INTENT", "Order has no paymentIntentId");
-
-    // already refunded
-    if (rr?.refund?.status === "succeeded" || rr.status === "refunded") {
-      return sendOk(res, rr);
-    }
-
-    // ✅ Compute refund amount:
-    // 1) if admin passed amount => use it directly
-    // 2) else use policy function based on rr.items or override items
-    let refundAmountMajor = undefined;
-
-    if (typeof amount === "number") {
-      refundAmountMajor = amount;
-    } else {
-      const returnItems = Array.isArray(items) && items.length ? items : rr.items || [];
-      refundAmountMajor = computeReturnRefundAmountMajor({
-        order,
-        returnItems,
-        includeShipping,
-      });
-    }
-
-    const finalIdem =
-      idemKey || `refund:return:${String(rr._id)}:${String(paymentIntentId)}`.slice(0, 200);
-
-    // mark return refund pending
-    await ReturnRequest.updateOne(
-      { _id: rr._id },
-      {
-        $set: {
-          status: "refund_pending",
-          "refund.status": "pending",
-          ...(note ? { adminNote: String(note).slice(0, 800) } : {}),
-        },
+      // Idempotent: return current state if already succeeded
+      if (rr.status === "refunded" || rr?.refund?.status === "succeeded") {
+        return sendOk(res, rr);
       }
-    );
 
-    // ✅ perform refund via service (this updates Order.refund + status)
-    let updatedOrder = null;
-    try {
-      updatedOrder = await refundStripeOrder({
-        orderId: order._id,
-        amountMajor: typeof refundAmountMajor === "number" ? refundAmountMajor : undefined,
-        reason: reason || "return",
-        note: note || "Refund due to return request",
-        idempotencyKey: finalIdem,
-      });
-    } catch (rfErr) {
-      await ReturnRequest.updateOne(
-        { _id: rr._id },
-        {
-          $set: {
-            status: "refund_pending",
-            "refund.status": "failed",
-            "refund.failureMessage": String(rfErr?.message || "Refund failed").slice(0, 400),
-            ...(note ? { adminNote: String(note).slice(0, 800) } : {}),
-          },
+      const orderId = rr.orderId;
+      if (!orderId || !isValidObjectId(orderId)) throw makeErr(400, "INVALID_ORDER_ID", "Return request has invalid orderId");
+
+      const order = await Order.findById(orderId);
+      if (!order) throw makeErr(404, "ORDER_NOT_FOUND", "Order not found");
+
+      // Strong duplicate protection: if the order is already fully refunded successfully, sync RR and return
+      if (order.status === "refunded" && order?.refund?.status === "succeeded") {
+        rr.status = "refunded";
+        rr.refundedAt = order.refund?.refundedAt || new Date();
+        rr.set("refund.status", "succeeded");
+        rr.set("refund.amount", order.refund?.amount || 0);
+        rr.set("refund.currency", String(order.refund?.currency || "ILS"));
+        rr.set("refund.stripeRefundId", order.refund?.stripeRefundId || "");
+        await rr.save();
+
+        // best-effort sync
+        try {
+          await syncOrderReturn(order._id, rr, "Return(refund): synced from order refund state");
+        } catch (e) {
+          req.log?.warn?.({ err: String(e?.message || e) }, "[best-effort] syncOrderReturn (order already refunded) failed");
         }
-      );
 
-      const pending = await ReturnRequest.findById(rr._id);
-      const pendingObj = pending?.toObject ? pending.toObject() : pending || {};
-      return res.status(202).json({
-        ok: true,
-        success: true,
-        data: {
-          ...pendingObj,
-          warning: "REFUND_PENDING_MANUAL_ACTION",
-        },
-      });
-    }
+        return sendOk(res, rr);
+      }
 
-    // ✅ mark ReturnRequest refunded
-    const updatedRR = await ReturnRequest.findByIdAndUpdate(
-      rr._id,
-      {
-        $set: {
-          status: "refunded",
-          refundedAt: new Date(),
-          "refund.status": "succeeded",
-          "refund.amount": Number(refundAmountMajor || order?.pricing?.total || 0),
-          "refund.currency": "ils",
-          "refund.stripeRefundId": String(updatedOrder?.refund?.stripeRefundId || ""),
-          ...(note ? { adminNote: String(note).slice(0, 800) } : {}),
-        },
-      },
-      { new: true }
-    );
+      if (order.paymentMethod !== "stripe") {
+        throw makeErr(400, "REFUND_NOT_SUPPORTED", "Refunds are only supported for Stripe orders");
+      }
 
-    // best-effort: sync Order.return.refunded
-    try {
-      await Order.updateOne(
-        { _id: order._id },
-        {
-          $set: {
-            "return.status": "refunded",
-            "return.processedAt": new Date(),
+      const paymentIntentId = String(order?.stripe?.paymentIntentId || "");
+      if (!paymentIntentId) throw makeErr(400, "MISSING_PAYMENT_INTENT", "Order has no paymentIntentId");
+
+      const idempotencyKey = buildDeterministicIdempotencyKey(rr._id, paymentIntentId);
+      if (!idempotencyKey) throw makeErr(400, "MISSING_IDEMPOTENCY_KEY", "Failed to build deterministic idempotency key");
+
+      // Compute refund amount (major)
+      let refundAmountMajor;
+
+      if (isNumber(amount)) {
+        refundAmountMajor = amount;
+      } else {
+        const returnItems = Array.isArray(items) && items.length ? items : rr.items || [];
+        refundAmountMajor = computeReturnRefundAmountMajor({
+          order,
+          returnItems,
+          includeShipping: Boolean(includeShipping),
+        });
+      }
+
+      if (!isNumber(refundAmountMajor)) {
+        throw makeErr(400, "INVALID_REFUND_AMOUNT", "Computed refund amount is invalid");
+      }
+
+      // Mark refund pending (pre-state for UI)
+      rr.status = "refund_pending";
+      rr.set("refund.status", "pending");
+      if (note) rr.adminNote = String(note).trim().slice(0, 800);
+      await rr.save();
+
+      // Perform refund via service (updates Order.refund + status)
+      let updatedOrder;
+      try {
+        updatedOrder = await refundStripeOrder({
+          orderId: order._id,
+          amountMajor: refundAmountMajor, // keep 0 valid
+          reason: reason || "return",
+          note: note || "Refund due to return request",
+          idempotencyKey,
+        });
+      } catch (rfErr) {
+        // Refund failed - keep RR in refund_pending but mark failure
+        rr.status = "refund_pending";
+        rr.set("refund.status", "failed");
+        rr.set("refund.failureMessage", String(rfErr?.message || "Refund failed").slice(0, 400));
+        await rr.save();
+
+        const rrObj = rr.toObject ? rr.toObject() : rr;
+        return res.status(202).json({
+          ok: true,
+          success: true,
+          data: {
+            ...rrObj,
+            warning: "REFUND_PENDING_MANUAL_ACTION",
           },
-        }
-      );
+        });
+      }
+
+      // Mark ReturnRequest refunded
+      rr.status = "refunded";
+      rr.refundedAt = new Date();
+      rr.set("refund.status", "succeeded");
+      rr.set("refund.amount", refundAmountMajor); // 0-safe
+      rr.set("refund.currency", "ILS");
+      rr.set("refund.stripeRefundId", String(updatedOrder?.refund?.stripeRefundId || ""));
+      await rr.save();
+
+      // Best-effort: sync embedded Order.return state
+      try {
+        await syncOrderReturn(order._id, rr, "Return(refund): succeeded");
+      } catch (e) {
+        req.log?.warn?.({ err: String(e?.message || e) }, "[best-effort] admin returns sync order refund status failed");
+      }
+
+      return sendOk(res, rr);
     } catch (e) {
-      console.warn("[best-effort] admin returns sync order refund status failed:", String(e?.message || e));
-      // best-effort sync - ignore failures
+      return jsonErr(req, res, e);
     }
-
-    return sendOk(res, updatedRR);
-  } catch (e) {
-    return jsonErr(res, e);
   }
-});
+);
 
 export default router;

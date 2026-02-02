@@ -2,13 +2,13 @@ import express from "express";
 import { z } from "zod";
 import mongoose from "mongoose";
 import { AuditLog } from "../models/AuditLog.js";
-import { requireAuth, requireRole } from "../middleware/auth.js";
+import { requireAuth, requirePermission, PERMISSIONS } from "../middleware/auth.js";
 import { sendOk, sendError } from "../utils/response.js";
 
 const router = express.Router();
 
 router.use(requireAuth());
-router.use(requireRole("admin"));
+router.use(requirePermission(PERMISSIONS.AUDIT_READ));
 
 const querySchema = z.object({
     page: z.coerce.number().min(1).default(1),

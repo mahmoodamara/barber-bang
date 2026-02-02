@@ -11,6 +11,10 @@ const auditLogSchema = new mongoose.Schema(
 
     before: { type: mongoose.Schema.Types.Mixed, default: null },
     after: { type: mongoose.Schema.Types.Mixed, default: null },
+    requestBody: { type: mongoose.Schema.Types.Mixed, default: null },
+
+    statusCode: { type: Number, default: null },
+    errorCode: { type: String, default: "" },
 
     requestId: { type: String, default: "" },
     ip: { type: String, default: "" },

@@ -1,13 +1,19 @@
 // src/services/pricing.service.js
 
+import mongoose from "mongoose";
 import { Product } from "../models/Product.js";
 import { Coupon } from "../models/Coupon.js";
+import { CouponReservation } from "../models/CouponReservation.js";
+import { CouponRedemption } from "../models/CouponRedemption.js";
+import { CouponUserUsage } from "../models/CouponUserUsage.js";
 import { Campaign } from "../models/Campaign.js";
 import { Gift } from "../models/Gift.js";
+import { SiteSettings } from "../models/SiteSettings.js";
 import { evaluateOffers } from "./offers.service.js";
 import { DeliveryArea } from "../models/DeliveryArea.js";
 import { PickupPoint } from "../models/PickupPoint.js";
 import { StorePickupConfig } from "../models/StorePickupConfig.js";
+import { withMongoTransaction } from "../utils/withMongoTransaction.js";
 
 /**
  * ============================
@@ -36,71 +42,171 @@ function clampInt(v, min, max) {
 }
 
 /**
+ * ✅ DELIVERABLE #2: Coupon functions refactored to use CouponReservation/CouponRedemption collections
+ *
+ * Key changes:
+ * - Uses CouponRedemption for tracking consumed coupons (unique index ensures idempotency)
+ * - Uses CouponReservation for tracking reserved coupons (TTL index for auto-cleanup)
+ * - Counters on Coupon document maintained atomically for fast limit checks
+ * - Supports per-user usage limits via usagePerUser field
+ */
+
+/**
  * ✅ Atomic coupon consumption with idempotency per order
- * Uses $expr for atomic usedCount < usageLimit check
- * Uses $addToSet to prevent double-consume per order
+ * Uses CouponRedemption collection (unique couponId+orderId ensures idempotency)
  * Returns: { success: boolean, alreadyUsed?: boolean, error?: string }
  */
-export async function consumeCouponAtomic({ code, orderId, session = null }) {
+async function withCouponTransaction(session, fn) {
+  if (session) return await fn(session);
+  return await withMongoTransaction(async (tx) => fn(tx));
+}
+
+async function incrementUserUsage({ couponId, userId, limit, session }) {
+  if (!userId || !limit || limit <= 0) return { ok: true, skipped: true };
+
+  const opts = session ? { session } : {};
+  const filter = {
+    couponId,
+    userId,
+    $expr: { $lt: [{ $ifNull: ["$usedCount", 0] }, limit] },
+  };
+
+  try {
+    const usage = await CouponUserUsage.findOneAndUpdate(
+      filter,
+      { $inc: { usedCount: 1 } },
+      { new: true, upsert: true, setDefaultsOnInsert: true, ...opts }
+    );
+    if (!usage) return { ok: false, error: "COUPON_USER_LIMIT_REACHED" };
+    return { ok: true, usage };
+  } catch (e) {
+    if (e?.code === 11000) {
+      const usage = await CouponUserUsage.findOneAndUpdate(
+        filter,
+        { $inc: { usedCount: 1 } },
+        { new: true, ...opts }
+      );
+      if (!usage) return { ok: false, error: "COUPON_USER_LIMIT_REACHED" };
+      return { ok: true, usage };
+    }
+    throw e;
+  }
+}
+
+async function decrementUserUsage({ couponId, userId, session }) {
+  if (!userId) return;
+  const opts = session ? { session } : {};
+  await CouponUserUsage.updateOne(
+    { couponId, userId, usedCount: { $gt: 0 } },
+    { $inc: { usedCount: -1 } },
+    opts
+  ).catch(() => {});
+}
+
+export async function consumeCouponAtomic({ code, orderId, userId = null, discountAmount = 0, session = null }) {
   if (!code || !orderId) {
     return { success: false, error: "Missing code or orderId" };
   }
 
   const normalized = String(code).trim().toUpperCase();
-  const orderObjId = typeof orderId === "string" ? orderId : orderId.toString();
-
-  // First check if already consumed by this order (idempotent)
-  const existing = await Coupon.findOne(
-    { code: normalized, usedByOrders: orderObjId },
-    null,
-    session ? { session } : {}
-  );
-  if (existing) {
-    return { success: true, alreadyUsed: true };
+  const orderObjId = mongoose.Types.ObjectId.isValid(orderId)
+    ? new mongoose.Types.ObjectId(orderId)
+    : null;
+  if (!orderObjId) {
+    return { success: false, error: "Invalid orderId" };
   }
 
-  // Atomic conditional update: only increment if usedCount < usageLimit (or unlimited)
-  const result = await Coupon.findOneAndUpdate(
-    {
-      code: normalized,
-      isActive: true,
-      usedByOrders: { $ne: orderObjId }, // prevent duplicate
-      $or: [
-        { usageLimit: null }, // unlimited
-        { $expr: { $lt: ["$usedCount", "$usageLimit"] } }, // has remaining uses
-      ],
-    },
-    {
-      $inc: { usedCount: 1 },
-      $addToSet: { usedByOrders: orderObjId },
-    },
-    {
-      new: true,
-      ...(session ? { session } : {}),
-    }
-  );
+  const userObjId =
+    userId && mongoose.Types.ObjectId.isValid(userId)
+      ? new mongoose.Types.ObjectId(userId)
+      : null;
 
-  if (!result) {
-    // Check why it failed
-    const coupon = await Coupon.findOne({ code: normalized }, null, session ? { session } : {});
+  return await withCouponTransaction(session, async (tx) => {
+    const opts = tx ? { session: tx } : {};
+
+    // Find coupon first
+    const coupon = await Coupon.findOne({ code: normalized }, null, opts);
     if (!coupon) return { success: false, error: "COUPON_NOT_FOUND" };
     if (!coupon.isActive) return { success: false, error: "COUPON_INACTIVE" };
+
+    // Check if already redeemed by this order (idempotent)
+    const existingRedemption = await CouponRedemption.findOne(
+      { couponId: coupon._id, orderId: orderObjId },
+      null,
+      opts
+    );
+    if (existingRedemption) {
+      return { success: true, alreadyUsed: true };
+    }
+
+    // Check usage limit
     if (coupon.usageLimit && coupon.usedCount >= coupon.usageLimit) {
       return { success: false, error: "COUPON_LIMIT_REACHED" };
     }
-    return { success: false, error: "COUPON_CONSUMPTION_FAILED" };
-  }
 
-  return { success: true, alreadyUsed: false };
+    // Atomic per-user usage check + increment (transactional)
+    let usageUpdated = false;
+    if (userObjId && coupon.usagePerUser) {
+      const usageRes = await incrementUserUsage({
+        couponId: coupon._id,
+        userId: userObjId,
+        limit: coupon.usagePerUser,
+        session: tx,
+      });
+      if (!usageRes.ok) return { success: false, error: usageRes.error || "COUPON_USER_LIMIT_REACHED" };
+      usageUpdated = true;
+    }
+
+    // Create redemption record (unique index ensures idempotency)
+    try {
+      await CouponRedemption.create(
+        [
+          {
+            couponId: coupon._id,
+            orderId: orderObjId,
+            userId: userObjId,
+            couponCode: normalized,
+            discountAmount: Number(discountAmount || 0),
+            redeemedAt: new Date(),
+          },
+        ],
+        opts
+      );
+    } catch (e) {
+      // Duplicate key error = already redeemed (concurrent request)
+      if (e.code === 11000) {
+        if (usageUpdated) {
+          await decrementUserUsage({ couponId: coupon._id, userId: userObjId, session: tx });
+        }
+        return { success: true, alreadyUsed: true };
+      }
+      throw e;
+    }
+
+    // Increment usedCount on Coupon (best-effort, for fast limit checks)
+    await Coupon.updateOne(
+      { _id: coupon._id },
+      { $inc: { usedCount: 1 } },
+      opts
+    ).catch((e) => {
+      console.warn("[coupon] usedCount increment failed:", String(e?.message || e));
+    });
+
+    return { success: true, alreadyUsed: false };
+  });
 }
 
 /**
- * Reserve a coupon usage for a specific order (Stripe flow)
- * Ensures (usedCount + reservedCount) < usageLimit atomically.
+ * ✅ Reserve a coupon usage for a specific order (Stripe flow)
+ * Uses CouponReservation collection with TTL index for auto-cleanup
+ *
+ * CONCURRENCY-SAFE: Uses atomic findOneAndUpdate with $expr conditions
+ * to prevent race conditions when multiple requests compete for the same coupon.
  */
 export async function reserveCouponAtomic({
   code,
   orderId,
+  userId = null,
   ttlMinutes = 15,
   session = null,
 } = {}) {
@@ -109,131 +215,293 @@ export async function reserveCouponAtomic({
   }
 
   const normalized = String(code).trim().toUpperCase();
-  const orderObjId = typeof orderId === "string" ? orderId : orderId.toString();
-  const now = new Date();
-  const expiresAt =
-    ttlMinutes && ttlMinutes > 0 ? new Date(Date.now() + ttlMinutes * 60 * 1000) : null;
-
-  const alreadyReserved = await Coupon.findOne(
-    { code: normalized, reservedByOrders: orderObjId },
-    null,
-    session ? { session } : {}
-  );
-  if (alreadyReserved) {
-    return { success: true, alreadyReserved: true, expiresAt };
+  const orderObjId = mongoose.Types.ObjectId.isValid(orderId)
+    ? new mongoose.Types.ObjectId(orderId)
+    : null;
+  if (!orderObjId) {
+    return { success: false, error: "Invalid orderId" };
   }
 
-  const result = await Coupon.findOneAndUpdate(
-    {
-      code: normalized,
-      isActive: true,
-      usedByOrders: { $ne: orderObjId },
-      reservedByOrders: { $ne: orderObjId },
-      $and: [
-        { $or: [{ startAt: null }, { startAt: { $lte: now } }] },
-        { $or: [{ endAt: null }, { endAt: { $gte: now } }] },
-      ],
-      $or: [
-        { usageLimit: null },
-        {
-          $expr: {
-            $lt: [
-              {
-                $add: [
-                  { $ifNull: ["$usedCount", 0] },
-                  { $ifNull: ["$reservedCount", 0] },
-                ],
-              },
-              "$usageLimit",
-            ],
-          },
-        },
-      ],
-    },
-    {
-      $inc: { reservedCount: 1 },
-      $addToSet: { reservedByOrders: orderObjId },
-    },
-    {
-      new: true,
-      ...(session ? { session } : {}),
+  const userObjId = userId && mongoose.Types.ObjectId.isValid(userId)
+    ? new mongoose.Types.ObjectId(userId)
+    : null;
+
+  const now = new Date();
+  const expiresAt = new Date(Date.now() + Math.max(1, ttlMinutes) * 60 * 1000);
+  const opts = session ? { session } : {};
+
+  // Find coupon first to validate basic conditions
+  const coupon = await Coupon.findOne({ code: normalized }, null, opts);
+  if (!coupon) return { success: false, error: "COUPON_NOT_FOUND" };
+  if (!coupon.isActive) return { success: false, error: "COUPON_INACTIVE" };
+  if (!isActiveByDates(coupon, now)) return { success: false, error: "COUPON_EXPIRED" };
+
+  // Check if already reserved by this order
+  const existingReservation = await CouponReservation.findOne(
+    { couponId: coupon._id, orderId: orderObjId, status: "active" },
+    null,
+    opts
+  );
+  if (existingReservation) {
+    return { success: true, alreadyReserved: true, expiresAt: existingReservation.expiresAt };
+  }
+
+  // Check if already redeemed by this order
+  const existingRedemption = await CouponRedemption.findOne(
+    { couponId: coupon._id, orderId: orderObjId },
+    null,
+    opts
+  );
+  if (existingRedemption) {
+    return { success: true, alreadyReserved: true, alreadyUsed: true, expiresAt };
+  }
+
+  // Check per-user limit using usage counter (avoid countDocuments)
+  if (userObjId && coupon.usagePerUser) {
+    const usage = await CouponUserUsage.findOne(
+      { couponId: coupon._id, userId: userObjId },
+      null,
+      opts
+    );
+    if (usage && Number(usage.usedCount || 0) >= coupon.usagePerUser) {
+      return { success: false, error: "COUPON_USER_LIMIT_REACHED" };
     }
+  }
+
+  // ✅ ATOMIC: Increment reservedCount with condition check
+  const updateFilter = {
+    _id: coupon._id,
+    isActive: true,
+  };
+
+  if (coupon.usageLimit) {
+    updateFilter.$expr = {
+      $lt: [
+        { $add: [{ $ifNull: ["$usedCount", 0] }, { $ifNull: ["$reservedCount", 0] }] },
+        coupon.usageLimit,
+      ],
+    };
+  }
+
+  const updatedCoupon = await Coupon.findOneAndUpdate(
+    updateFilter,
+    { $inc: { reservedCount: 1 } },
+    { new: true, ...opts }
   );
 
-  if (!result) {
-    const coupon = await Coupon.findOne({ code: normalized }, null, session ? { session } : {});
-    if (!coupon) return { success: false, error: "COUPON_NOT_FOUND" };
-    if (!coupon.isActive) return { success: false, error: "COUPON_INACTIVE" };
-    if (!isActiveByDates(coupon, now)) return { success: false, error: "COUPON_EXPIRED" };
-    if (
-      coupon.usageLimit &&
-      Number(coupon.usedCount || 0) + Number(coupon.reservedCount || 0) >= coupon.usageLimit
-    ) {
-      return { success: false, error: "COUPON_LIMIT_REACHED" };
+  if (!updatedCoupon) {
+    return { success: false, error: "COUPON_LIMIT_REACHED" };
+  }
+
+  // Create reservation record (unique index on couponId+orderId ensures idempotency)
+  let reservation;
+  try {
+    [reservation] = await CouponReservation.create(
+      [
+        {
+          couponId: coupon._id,
+          orderId: orderObjId,
+          userId: userObjId,
+          couponCode: normalized,
+          expiresAt,
+          status: "active",
+        },
+      ],
+      opts
+    );
+  } catch (e) {
+    if (e.code === 11000) {
+      // Rollback the reservedCount increment (guard prevents negative counter)
+      await Coupon.updateOne(
+        { _id: coupon._id, reservedCount: { $gt: 0 } },
+        { $inc: { reservedCount: -1 } },
+        opts
+      ).catch(() => {});
+
+      // Check if this order already has a reservation (idempotent case)
+      const existingByOrder = await CouponReservation.findOne(
+        { couponId: coupon._id, orderId: orderObjId },
+        null,
+        opts
+      );
+      if (existingByOrder) {
+        return { success: true, alreadyReserved: true, expiresAt: existingByOrder.expiresAt || expiresAt };
+      }
+
+      // If no reservation for this order, duplicate was from userId index
+      if (userObjId) {
+        return { success: false, error: "COUPON_USER_LIMIT_REACHED" };
+      }
+
+      return { success: true, alreadyReserved: true, expiresAt };
     }
-    return { success: false, error: "COUPON_RESERVATION_FAILED" };
+    // Rollback on other errors (guard prevents negative counter)
+    await Coupon.updateOne(
+      { _id: coupon._id, reservedCount: { $gt: 0 } },
+      { $inc: { reservedCount: -1 } },
+      opts
+    ).catch(() => {});
+    throw e;
   }
 
   return { success: true, reserved: true, expiresAt };
 }
 
+/**
+ * ✅ Release a coupon reservation
+ * Marks CouponReservation as released and decrements reservedCount
+ */
 export async function releaseCouponReservation({ code, orderId, session = null } = {}) {
   if (!code || !orderId) return { success: false, error: "Missing code or orderId" };
 
   const normalized = String(code).trim().toUpperCase();
-  const orderObjId = typeof orderId === "string" ? orderId : orderId.toString();
+  const orderObjId = mongoose.Types.ObjectId.isValid(orderId)
+    ? new mongoose.Types.ObjectId(orderId)
+    : null;
+  if (!orderObjId) {
+    return { success: false, error: "Invalid orderId" };
+  }
 
-  const res = await Coupon.findOneAndUpdate(
-    { code: normalized, reservedByOrders: orderObjId, reservedCount: { $gt: 0 } },
-    {
-      $inc: { reservedCount: -1 },
-      $pull: { reservedByOrders: orderObjId },
-    },
-    { new: true, ...(session ? { session } : {}) }
+  const opts = session ? { session } : {};
+
+  // Find and update reservation atomically
+  const reservation = await CouponReservation.findOneAndUpdate(
+    { couponCode: normalized, orderId: orderObjId, status: "active" },
+    { $set: { status: "released" } },
+    { new: true, ...opts }
   );
 
-  if (!res) return { success: false, error: "RESERVATION_NOT_FOUND" };
+  if (!reservation) {
+    return { success: false, error: "RESERVATION_NOT_FOUND" };
+  }
+
+  // Decrement reservedCount on Coupon (best-effort)
+  await Coupon.updateOne(
+    { _id: reservation.couponId, reservedCount: { $gt: 0 } },
+    { $inc: { reservedCount: -1 } },
+    opts
+  ).catch((e) => {
+    console.warn("[coupon] reservedCount decrement failed:", String(e?.message || e));
+  });
+
   return { success: true };
 }
 
-export async function consumeReservedCoupon({ code, orderId, session = null } = {}) {
+/**
+ * ✅ Consume a previously reserved coupon
+ * Converts CouponReservation to CouponRedemption atomically.
+ * Requires an active reservation; does not create a redemption or change counters if none exists.
+ */
+export async function consumeReservedCoupon({ code, orderId, userId = null, discountAmount = 0, session = null } = {}) {
   if (!code || !orderId) {
     return { success: false, error: "Missing code or orderId" };
   }
 
   const normalized = String(code).trim().toUpperCase();
-  const orderObjId = typeof orderId === "string" ? orderId : orderId.toString();
-
-  const alreadyUsed = await Coupon.findOne(
-    { code: normalized, usedByOrders: orderObjId },
-    null,
-    session ? { session } : {}
-  );
-  if (alreadyUsed) {
-    return { success: true, alreadyUsed: true };
+  const orderObjId = mongoose.Types.ObjectId.isValid(orderId)
+    ? new mongoose.Types.ObjectId(orderId)
+    : null;
+  if (!orderObjId) {
+    return { success: false, error: "Invalid orderId" };
   }
 
-  const result = await Coupon.findOneAndUpdate(
-    { code: normalized, reservedByOrders: orderObjId, reservedCount: { $gt: 0 } },
-    {
-      $inc: { reservedCount: -1, usedCount: 1 },
-      $pull: { reservedByOrders: orderObjId },
-      $addToSet: { usedByOrders: orderObjId },
-    },
-    { new: true, ...(session ? { session } : {}) }
-  );
+  return await withCouponTransaction(session, async (tx) => {
+    const opts = tx ? { session: tx } : {};
 
-  if (!result) {
-    return { success: false, error: "COUPON_CONSUME_FAILED" };
-  }
+    // Find coupon
+    const coupon = await Coupon.findOne({ code: normalized }, null, opts);
+    if (!coupon) return { success: false, error: "COUPON_NOT_FOUND" };
 
-  return { success: true };
+    // Check if already redeemed (idempotent)
+    const existingRedemption = await CouponRedemption.findOne(
+      { couponId: coupon._id, orderId: orderObjId },
+      null,
+      opts
+    );
+    if (existingRedemption) {
+      return { success: true, alreadyUsed: true };
+    }
+
+    // Find active reservation - required; fail if missing
+    const reservation = await CouponReservation.findOne(
+      { couponId: coupon._id, orderId: orderObjId, status: "active" },
+      null,
+      opts
+    );
+    if (!reservation) {
+      return { success: false, error: "RESERVATION_NOT_FOUND" };
+    }
+
+    // Infer userId from reservation when not passed
+    const finalUserId = userId ?? reservation.userId;
+    const userObjId =
+      finalUserId && mongoose.Types.ObjectId.isValid(finalUserId)
+        ? new mongoose.Types.ObjectId(finalUserId)
+        : null;
+
+    // Atomic per-user usage check + increment (transactional)
+    let usageUpdated = false;
+    if (userObjId && coupon.usagePerUser) {
+      const usageRes = await incrementUserUsage({
+        couponId: coupon._id,
+        userId: userObjId,
+        limit: coupon.usagePerUser,
+        session: tx,
+      });
+      if (!usageRes.ok) return { success: false, error: usageRes.error || "COUPON_USER_LIMIT_REACHED" };
+      usageUpdated = true;
+    }
+
+    // Create redemption record (only path that creates it)
+    try {
+      await CouponRedemption.create(
+        [
+          {
+            couponId: coupon._id,
+            orderId: orderObjId,
+            userId: userObjId,
+            couponCode: normalized,
+            discountAmount: Number(discountAmount || 0),
+            redeemedAt: new Date(),
+          },
+        ],
+        opts
+      );
+    } catch (e) {
+      if (e.code === 11000) {
+        if (usageUpdated) {
+          await decrementUserUsage({ couponId: coupon._id, userId: userObjId, session: tx });
+        }
+        return { success: true, alreadyUsed: true };
+      }
+      throw e;
+    }
+
+    // Mark reservation as consumed
+    await CouponReservation.updateOne(
+      { _id: reservation._id },
+      { $set: { status: "consumed" } },
+      opts
+    ).catch(() => {});
+
+    // Decrement reservedCount only if > 0, increment usedCount (prevents negative reservedCount)
+    await Coupon.updateOne(
+      { _id: coupon._id, reservedCount: { $gt: 0 } },
+      { $inc: { reservedCount: -1, usedCount: 1 } },
+      opts
+    ).catch((e) => {
+      console.warn("[coupon] counter update failed:", String(e?.message || e));
+    });
+
+    return { success: true };
+  });
 }
 
-function makeErr(statusCode, code, message) {
+function makeErr(statusCode, code, message, details = null) {
   const err = new Error(message);
   err.statusCode = statusCode;
   err.code = code;
+  if (details) err.details = details;
   return err;
 }
 
@@ -589,7 +857,11 @@ async function resolveGifts({ totalBeforeShippingMajor, lineItems }) {
   if (!matchedGiftRequests.length) return { gifts: [], giftWarnings: [] };
 
   const giftProductIds = [...new Set(matchedGiftRequests.map((x) => x.productId))];
-  const giftProducts = await Product.find({ _id: { $in: giftProductIds }, isActive: true })
+  const giftProducts = await Product.find({
+    _id: { $in: giftProductIds },
+    isActive: true,
+    isDeleted: { $ne: true },
+  })
     .select("_id titleHe titleAr title stock variants")
     .lean();
 
@@ -702,13 +974,16 @@ export async function quotePricing({ cartItems, shipping, couponCode }) {
   const vatEnabled = String(process.env.ENABLE_VAT ?? "true").trim().toLowerCase() !== "false";
   const vatRateRaw = Number(process.env.VAT_RATE ?? 0.18);
   const vatRate = vatEnabled ? Math.min(1, Math.max(0, vatRateRaw)) : 0;
-  const vatIncludedInPrices = false;
+
+  // ✅ Load VAT mode from settings (default true for IL B2C)
+  const settings = await SiteSettings.findOne().lean();
+  const pricesIncludeVat = Boolean(settings?.pricingRules?.pricesIncludeVat ?? true);
 
   if (!Array.isArray(cartItems) || cartItems.length === 0) {
     throw makeErr(400, "EMPTY_CART", "cartItems is required");
   }
 
-  // 1) Load products (active only)
+  // 1) Load products (active and not deleted)
   const ids = [
     ...new Set(
       cartItems
@@ -721,7 +996,11 @@ export async function quotePricing({ cartItems, shipping, couponCode }) {
     throw makeErr(400, "INVALID_CART_ITEMS", "No valid productId in cartItems");
   }
 
-  const products = await Product.find({ _id: { $in: ids }, isActive: true }).lean();
+  const products = await Product.find({
+    _id: { $in: ids },
+    isActive: true,
+    isDeleted: { $ne: true },
+  }).lean();
   const byId = new Map(products.map((p) => [p._id.toString(), p]));
 
   const items = [];
@@ -745,10 +1024,40 @@ export async function quotePricing({ cartItems, shipping, couponCode }) {
     }
 
     const stock = hasVariants ? clampInt(variant?.stock ?? 0, 0, 999999) : clampInt(p.stock ?? 0, 0, 999999);
-    if (stock <= 0) continue;
-
     const requestedQty = clampInt(c?.qty ?? 1, 1, 999);
-    const allowedQty = Math.min(requestedQty, stock);
+
+    /**
+     * ✅ DELIVERABLE #3: Prevent silent quantity reduction
+     * Instead of silently reducing qty to available stock, reject with 409 error
+     * This ensures frontend is aware of stock issues before checkout completion
+     */
+    if (stock <= 0) {
+      throw makeErr(409, "OUT_OF_STOCK", "Product is out of stock", {
+        items: [{
+          productId: p._id.toString(),
+          variantId: variant ? String(variant?._id || "") : null,
+          titleHe: p.titleHe || p.title || "",
+          titleAr: p.titleAr || "",
+          requested: requestedQty,
+          available: 0,
+        }],
+      });
+    }
+
+    if (requestedQty > stock) {
+      throw makeErr(409, "OUT_OF_STOCK_PARTIAL", "Requested quantity exceeds available stock", {
+        items: [{
+          productId: p._id.toString(),
+          variantId: variant ? String(variant?._id || "") : null,
+          titleHe: p.titleHe || p.title || "",
+          titleAr: p.titleAr || "",
+          requested: requestedQty,
+          available: stock,
+        }],
+      });
+    }
+
+    const allowedQty = requestedQty; // No silent reduction
 
     const unitMinor = computeEffectiveUnitPriceMinor(p, variant, now);
     const lineMinor = unitMinor * allowedQty;
@@ -859,17 +1168,45 @@ export async function quotePricing({ cartItems, shipping, couponCode }) {
   // Collect all gift warnings
   const giftWarnings = [...giftWarningsFromRules, ...offerGiftWarnings];
 
-  // 7) Total
-  const totalMinor = Math.max(0, totalBeforeShippingMinor + shippingFeeMinor);
+  // 7) Total (before VAT adjustment for VAT-exclusive mode)
+  let totalMinor = Math.max(0, totalBeforeShippingMinor + shippingFeeMinor);
 
-  // 8) VAT breakdown (total is VAT-inclusive)
-  const totalAfterVatMinor = totalMinor;
-  let totalBeforeVatMinor = totalAfterVatMinor;
+  // 8) VAT breakdown - handles both VAT-inclusive and VAT-exclusive pricing modes
+  let totalAfterVatMinor = 0;
+  let totalBeforeVatMinor = 0;
   let vatAmountMinor = 0;
 
   if (vatRate > 0) {
-    totalBeforeVatMinor = Math.max(0, Math.round(totalAfterVatMinor / (1 + vatRate)));
-    vatAmountMinor = Math.max(0, totalAfterVatMinor - totalBeforeVatMinor);
+    if (pricesIncludeVat) {
+      // ✅ VAT-INCLUSIVE: Catalog prices already include VAT (IL B2C default)
+      // totalMinor is the final amount including VAT
+      totalAfterVatMinor = totalMinor;
+      totalBeforeVatMinor = Math.max(0, Math.round(totalAfterVatMinor / (1 + vatRate)));
+      vatAmountMinor = Math.max(0, totalAfterVatMinor - totalBeforeVatMinor);
+    } else {
+      // ✅ VAT-EXCLUSIVE: Catalog prices are net, VAT is added on top
+      // totalMinor is net amount, we need to add VAT
+      totalBeforeVatMinor = totalMinor;
+      vatAmountMinor = Math.max(0, Math.round(totalBeforeVatMinor * vatRate));
+      totalAfterVatMinor = totalBeforeVatMinor + vatAmountMinor;
+      // Update totalMinor to include VAT for Stripe
+      totalMinor = totalAfterVatMinor;
+    }
+  } else {
+    // No VAT
+    totalAfterVatMinor = totalMinor;
+    totalBeforeVatMinor = totalMinor;
+    vatAmountMinor = 0;
+  }
+
+  // ✅ Assertion in dev/test: Verify VAT math equality holds
+  if (process.env.NODE_ENV !== "production") {
+    const vatEquality = totalBeforeVatMinor + vatAmountMinor === totalAfterVatMinor;
+    if (!vatEquality) {
+      console.error(
+        `[pricing.service] VAT MATH ASSERTION FAILED: ${totalBeforeVatMinor} + ${vatAmountMinor} !== ${totalAfterVatMinor}`
+      );
+    }
   }
 
   return {
@@ -884,7 +1221,7 @@ export async function quotePricing({ cartItems, shipping, couponCode }) {
     total: fromMinor(totalMinor),
 
     vatRate,
-    vatIncludedInPrices,
+    vatIncludedInPrices: pricesIncludeVat,
     vatAmount: fromMinor(vatAmountMinor),
     totalBeforeVat: fromMinor(totalBeforeVatMinor),
     totalAfterVat: fromMinor(totalAfterVatMinor),

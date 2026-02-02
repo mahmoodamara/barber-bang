@@ -518,11 +518,16 @@ router.get("/", async (req, res) => {
    GET /api/products/:slugOrId
 ============================================================================ */
 
-router.get("/:slugOrId", async (req, res) => {
+const RANKING_LITERALS = ["best-sellers", "most-popular", "top-rated", "featured", "new-arrivals"];
+
+router.get("/:slugOrId", async (req, res, next) => {
   try {
     const slugOrId = String(req.params.slugOrId || "").trim();
     if (!slugOrId) {
       return sendNotFound(res);
+    }
+    if (RANKING_LITERALS.includes(slugOrId)) {
+      return next("route");
     }
 
     const filter = { isActive: true, isDeleted: { $ne: true } };
@@ -572,7 +577,7 @@ router.get("/:id/reviews", validate(reviewsListSchema), async (req, res) => {
   try {
     const productId = String(req.params.id || "");
     if (!isValidObjectId(productId)) {
-      return sendNotFound(res);
+      return sendError(res, 400, "BAD_REQUEST", "Invalid product id");
     }
 
     const exists = await Product.exists({ _id: productId, isActive: true, isDeleted: { $ne: true } });
@@ -583,60 +588,26 @@ router.get("/:id/reviews", validate(reviewsListSchema), async (req, res) => {
     const page = Math.max(Number(req.query.page || 1), 1);
     const limit = Math.min(Math.max(Number(req.query.limit || 10), 1), 50);
 
-    const [items, total, stats] = await Promise.all([
-      Review.find({
-        productId,
-        isHidden: { $ne: true },
-        $or: [{ moderationStatus: "approved" }, { moderationStatus: { $exists: false } }],
-      })
-        .sort({ createdAt: -1 })
-        .skip((page - 1) * limit)
-        .limit(limit)
-        .lean(),
-      Review.countDocuments({
-        productId,
-        isHidden: { $ne: true },
-        $or: [{ moderationStatus: "approved" }, { moderationStatus: { $exists: false } }],
-      }),
-      Review.aggregate([
-        {
-          $match: {
-            productId: new mongoose.Types.ObjectId(productId),
-            isHidden: { $ne: true },
-            $or: [{ moderationStatus: "approved" }, { moderationStatus: { $exists: false } }],
-          },
-        },
-        { $group: { _id: null, avgRating: { $avg: "$rating" }, count: { $sum: 1 } } },
-      ]),
-    ]);
+    const items = await Review.find({
+      productId,
+      isHidden: { $ne: true },
+      $or: [{ moderationStatus: "approved" }, { moderationStatus: { $exists: false } }],
+    })
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .lean();
 
-    const avgRatingRaw = stats?.[0]?.avgRating ?? 0;
-    const count = stats?.[0]?.count ?? 0;
-    const pages = Math.ceil(total / limit);
+    const data = items.map((r) => ({
+      id: r._id,
+      _id: r._id,
+      rating: Number(r.rating || 0),
+      comment: sanitizePlainText(r.comment || "", { maxLen: 600 }),
+      createdAt: r.createdAt,
+      userId: r.userId,
+    }));
 
-    return sendOk(
-      res,
-      {
-        items: items.map((r) => ({
-          id: r._id,
-          _id: r._id,
-          rating: Number(r.rating || 0),
-          comment: sanitizePlainText(r.comment || "", { maxLen: 600 }),
-          createdAt: r.createdAt,
-          userId: r.userId, // keep minimal; safe enough
-        })),
-        avgRating: Math.round((Number(avgRatingRaw) + Number.EPSILON) * 10) / 10, // 1 decimal
-        count,
-      },
-      {
-        page,
-        limit,
-        total,
-        pages,
-        hasNext: page < pages,
-        hasPrev: page > 1,
-      }
-    );
+    return res.status(200).json({ ok: true, data });
   } catch (e) {
     return jsonErr(res, e);
   }
@@ -700,331 +671,5 @@ router.post("/:id/reviews", requireAuth(), validate(reviewCreateSchema), async (
     return jsonErr(res, e);
   }
 });
-
-/* ============================================================================
-   ADMIN CREATE / UPDATE / DELETE PRODUCTS
-============================================================================ */
-const createBodySchema = z
-  .object({
-    titleHe: z.string().min(2).max(160).optional(),
-    titleAr: z.string().max(160).optional(),
-    descriptionHe: z.string().max(4000).optional(),
-    descriptionAr: z.string().max(4000).optional(),
-
-    title: z.string().min(2).max(160).optional(),
-    description: z.string().max(4000).optional(),
-
-    price: z.number().min(0),
-    stock: z.number().int().min(0),
-    categoryId: z.string().min(1),
-
-    imageUrl: z.string().optional(),
-    isActive: z.boolean().optional(),
-
-    salePrice: z.number().min(0).nullable().optional(),
-    discountPercent: z.number().min(0).max(100).nullable().optional(),
-    saleStartAt: z.string().datetime().nullable().optional(),
-    saleEndAt: z.string().datetime().nullable().optional(),
-
-    brand: z.string().max(120).optional(),
-    sku: z.string().max(80).optional(),
-    barcode: z.string().max(80).optional(),
-    sizeLabel: z.string().max(80).optional(),
-    unit: z.enum(["ml", "g", "pcs", "set"]).nullable().optional(),
-    netQuantity: z.number().min(0).nullable().optional(),
-    tags: z.array(z.string().max(40)).optional(),
-    ingredients: z.string().max(4000).optional(),
-    usage: z.string().max(4000).optional(),
-    warnings: z.string().max(4000).optional(),
-    manufacturerName: z.string().max(160).optional(),
-    importerName: z.string().max(160).optional(),
-    countryOfOrigin: z.string().max(120).optional(),
-    warrantyInfo: z.string().max(400).optional(),
-
-    variants: z
-      .array(
-        z.object({
-          _id: z.string().min(1).optional(),
-          sku: z.string().max(80).optional(),
-          barcode: z.string().max(80).optional(),
-          priceOverride: z.number().min(0).nullable().optional(),
-          stock: z.number().int().min(0),
-          attributes: z
-            .array(
-              z.object({
-                key: z.string().min(1).max(80),
-                type: z.enum(["text", "number", "enum"]),
-                value: z.any().optional(),
-                valueKey: z.string().max(80).optional(),
-                unit: z.string().max(20).optional(),
-              })
-            )
-            .optional(),
-          volumeMl: z.number().min(0).nullable().optional(),
-          weightG: z.number().min(0).nullable().optional(),
-          packCount: z.number().min(0).nullable().optional(),
-          scent: z.string().max(80).optional(),
-          holdLevel: z.string().max(80).optional(),
-          finishType: z.string().max(80).optional(),
-          skinType: z.string().max(80).optional(),
-        })
-      )
-      .optional(),
-  })
-  .superRefine((b, ctx) => {
-    if (b.categoryId && !isValidObjectId(b.categoryId)) {
-      ctx.addIssue({ code: "custom", path: ["categoryId"], message: "Invalid categoryId" });
-    }
-
-    // ✅ only validate this in CREATE (price is required here)
-    if (b.salePrice != null && !(Number(b.salePrice) < Number(b.price))) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["salePrice"],
-        message: "salePrice must be less than price to be considered on sale",
-      });
-    }
-  });
-
-const updateBodySchema = z
-  .object({
-    titleHe: z.string().min(2).max(160).optional(),
-    titleAr: z.string().max(160).optional(),
-    descriptionHe: z.string().max(4000).optional(),
-    descriptionAr: z.string().max(4000).optional(),
-
-    title: z.string().min(2).max(160).optional(),
-    description: z.string().max(4000).optional(),
-
-    price: z.number().min(0).optional(),
-    stock: z.number().int().min(0).optional(),
-    categoryId: z.string().min(1).optional(),
-
-    imageUrl: z.string().optional(),
-    isActive: z.boolean().optional(),
-
-    salePrice: z.number().min(0).nullable().optional(),
-    discountPercent: z.number().min(0).max(100).nullable().optional(),
-    saleStartAt: z.string().datetime().nullable().optional(),
-    saleEndAt: z.string().datetime().nullable().optional(),
-
-    brand: z.string().max(120).optional(),
-    sku: z.string().max(80).optional(),
-    barcode: z.string().max(80).optional(),
-    sizeLabel: z.string().max(80).optional(),
-    unit: z.enum(["ml", "g", "pcs", "set"]).nullable().optional(),
-    netQuantity: z.number().min(0).nullable().optional(),
-    tags: z.array(z.string().max(40)).optional(),
-    ingredients: z.string().max(4000).optional(),
-    usage: z.string().max(4000).optional(),
-    warnings: z.string().max(4000).optional(),
-    manufacturerName: z.string().max(160).optional(),
-    importerName: z.string().max(160).optional(),
-    countryOfOrigin: z.string().max(120).optional(),
-    warrantyInfo: z.string().max(400).optional(),
-
-    variants: z
-      .array(
-        z.object({
-          _id: z.string().min(1).optional(),
-          sku: z.string().max(80).optional(),
-          barcode: z.string().max(80).optional(),
-          priceOverride: z.number().min(0).nullable().optional(),
-          stock: z.number().int().min(0),
-          attributes: z
-            .array(
-              z.object({
-                key: z.string().min(1).max(80),
-                type: z.enum(["text", "number", "enum"]),
-                value: z.any().optional(),
-                valueKey: z.string().max(80).optional(),
-                unit: z.string().max(20).optional(),
-              })
-            )
-            .optional(),
-          volumeMl: z.number().min(0).nullable().optional(),
-          weightG: z.number().min(0).nullable().optional(),
-          packCount: z.number().min(0).nullable().optional(),
-          scent: z.string().max(80).optional(),
-          holdLevel: z.string().max(80).optional(),
-          finishType: z.string().max(80).optional(),
-          skinType: z.string().max(80).optional(),
-        })
-      )
-      .optional(),
-  })
-  .superRefine((b, ctx) => {
-    if (b.categoryId && !isValidObjectId(b.categoryId)) {
-      ctx.addIssue({ code: "custom", path: ["categoryId"], message: "Invalid categoryId" });
-    }
-
-    // ✅ validate salePrice < price ONLY if both provided in update payload
-    if (b.salePrice != null && b.price != null) {
-      if (!(Number(b.salePrice) < Number(b.price))) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["salePrice"],
-          message: "salePrice must be less than price to be considered on sale",
-        });
-      }
-    }
-  });
-
-const createSchema = z.object({
-  body: createBodySchema,
-});
-
-
-router.post("/", requireAuth(), requireRole("admin"), validate(createSchema), async (req, res) => {
-  try {
-    const b = req.validated.body;
-
-    const variants = Array.isArray(b.variants)
-      ? await applyCatalogValidationToVariants(
-        b.variants.map((v) => ({
-          ...v,
-          priceOverrideMinor: v.priceOverride != null ? toMinorSafe(v.priceOverride) : null,
-        }))
-      )
-      : [];
-
-    const item = await Product.create({
-      titleHe: b.titleHe || b.title || "",
-      titleAr: b.titleAr || "",
-      descriptionHe: b.descriptionHe || b.description || "",
-      descriptionAr: b.descriptionAr || "",
-
-      // legacy fields (optional)
-      title: b.title || b.titleHe || "",
-      description: b.description || b.descriptionHe || "",
-
-      price: b.price,
-      stock: b.stock,
-      categoryId: b.categoryId,
-      imageUrl: b.imageUrl || "",
-
-      isActive: b.isActive ?? true,
-
-      salePrice: b.salePrice ?? null,
-      discountPercent: b.discountPercent ?? null,
-      saleStartAt: b.saleStartAt ? new Date(b.saleStartAt) : null,
-      saleEndAt: b.saleEndAt ? new Date(b.saleEndAt) : null,
-
-      priceMinor: toMinorSafe(b.price),
-      salePriceMinor: b.salePrice != null ? toMinorSafe(b.salePrice) : null,
-
-      brand: b.brand || "",
-      sku: b.sku || "",
-      barcode: b.barcode || "",
-      sizeLabel: b.sizeLabel || "",
-      unit: b.unit ?? null,
-      netQuantity: b.netQuantity ?? null,
-      tags: Array.isArray(b.tags) ? b.tags : [],
-      ingredients: b.ingredients || "",
-      usage: b.usage || "",
-      warnings: b.warnings || "",
-      manufacturerName: b.manufacturerName || "",
-      importerName: b.importerName || "",
-      countryOfOrigin: b.countryOfOrigin || "",
-      warrantyInfo: b.warrantyInfo || "",
-
-      variants,
-    });
-
-    return sendCreated(res, mapProductDetailsDoc(item, req.lang));
-  } catch (e) {
-    return jsonErr(res, e);
-  }
-});
-
-const updateSchema = z.object({
-  params: z.object({ id: z.string().min(1) }),
-  body: updateBodySchema,
-});
-
-router.put(
-  "/:id",
-  requireAuth(),
-  requireRole("admin"),
-  validate(updateSchema),
-  async (req, res) => {
-    try {
-      const id = String(req.params.id || "");
-      if (!isValidObjectId(id)) {
-        return sendNotFound(res);
-      }
-
-      const b = req.validated.body;
-      const patch = { ...b };
-
-      // Keep legacy synced if someone updates HE fields
-      if (patch.titleHe && !patch.title) patch.title = patch.titleHe;
-      if (patch.descriptionHe && !patch.description) patch.description = patch.descriptionHe;
-
-      // ISO string -> Date
-      if ("saleStartAt" in patch)
-        patch.saleStartAt = patch.saleStartAt ? new Date(patch.saleStartAt) : null;
-      if ("saleEndAt" in patch)
-        patch.saleEndAt = patch.saleEndAt ? new Date(patch.saleEndAt) : null;
-
-      // Normalize salePrice clearing
-      if ("salePrice" in patch && patch.salePrice === undefined) delete patch.salePrice;
-
-      if ("price" in patch) patch.priceMinor = toMinorSafe(patch.price);
-      if ("salePrice" in patch) {
-        patch.salePriceMinor = patch.salePrice != null ? toMinorSafe(patch.salePrice) : null;
-      }
-
-      if ("variants" in patch && Array.isArray(patch.variants)) {
-        patch.variants = await applyCatalogValidationToVariants(
-          patch.variants.map((v) => ({
-            ...v,
-            priceOverrideMinor: v?.priceOverride != null ? toMinorSafe(v.priceOverride) : null,
-          }))
-        );
-      }
-
-      const item = await Product.findByIdAndUpdate(id, patch, { new: true });
-      if (!item) {
-        return sendNotFound(res);
-      }
-
-      return sendOk(res, mapProductDetailsDoc(item, req.lang));
-    } catch (e) {
-      return jsonErr(res, e);
-    }
-  },
-);
-
-router.delete("/:id", requireAuth(), requireRole("admin"), async (req, res) => {
-  try {
-    const id = String(req.params.id || "");
-    if (!isValidObjectId(id)) {
-      return sendNotFound(res);
-    }
-
-    // Soft delete: set isDeleted=true, isActive=false, deletedAt=now
-    const item = await Product.findByIdAndUpdate(
-      id,
-      {
-        $set: {
-          isDeleted: true,
-          isActive: false,
-          deletedAt: new Date(),
-        },
-      },
-      { new: true }
-    );
-
-    if (!item) {
-      return sendNotFound(res);
-    }
-
-    return sendOk(res, { deleted: true, id: item._id });
-  } catch (e) {
-    return jsonErr(res, e);
-  }
-});
-
 
 export default router;

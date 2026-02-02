@@ -42,6 +42,14 @@ const siteSettingsSchema = new mongoose.Schema(
       freeShippingThresholdMinor: { type: Number, default: 0, min: 0 },
       minOrderAmountMinor: { type: Number, default: 0, min: 0 },
     },
+    /**
+     * ✅ Pricing rules for VAT handling
+     * pricesIncludeVat: true means catalog prices already include VAT (IL B2C default)
+     * pricesIncludeVat: false means catalog prices are net, VAT is added on top
+     */
+    pricingRules: {
+      pricesIncludeVat: { type: Boolean, default: true },
+    },
   },
   {
     timestamps: true,

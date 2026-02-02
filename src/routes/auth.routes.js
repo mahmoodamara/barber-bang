@@ -213,6 +213,27 @@ router.post("/logout", requireAuth(), async (req, res) => {
   return res.json(okPayload({}));
 });
 
+/**
+ * GET /api/auth/me
+ * Returns the currently authenticated user's profile.
+ * Protected by JWT - relies on req.user populated by requireAuth middleware.
+ * Does NOT re-parse the token; uses req.user directly.
+ */
+router.get("/me", requireAuth(), async (req, res) => {
+  // req.user is already populated by requireAuth middleware
+  // Return safe user data (no passwordHash, no sensitive fields)
+  const user = req.user;
+
+  return res.json(
+    okPayload({
+      id: user._id,
+      name: user.name || "",
+      email: user.email || "",
+      role: user.role || "user",
+    })
+  );
+});
+
 const refreshSchema = z.object({
   body: z.object({
     refreshToken: z.string().min(1),

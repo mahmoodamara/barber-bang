@@ -199,7 +199,12 @@ export async function confirmStockReservation({ orderId, session = null, now = n
     { new: true, ...(session ? { session } : {}) }
   );
 
-  return updated;
+  if (updated) return updated;
+
+  const fresh = await StockReservation.findOne({ orderId }, null, session ? { session } : {});
+  if (fresh && fresh.status === "confirmed") return fresh;
+
+  return null;
 }
 
 export async function releaseStockReservation({ orderId, session = null }) {

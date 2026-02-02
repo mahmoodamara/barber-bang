@@ -2,6 +2,7 @@ import express from "express";
 
 import { Coupon } from "../models/Coupon.js";
 import { getRequestId } from "../middleware/error.js";
+import { limitCouponValidate } from "../middleware/rateLimit.js";
 
 const router = express.Router();
 
@@ -17,7 +18,7 @@ function errorPayload(req, code, message) {
   };
 }
 
-router.get("/validate", async (req, res) => {
+router.get("/validate", limitCouponValidate, async (req, res) => {
   const code = String(req.query.code || "").trim().toUpperCase();
   if (!code) {
     return res.status(400).json(errorPayload(req, "VALIDATION_ERROR", "code is required"));

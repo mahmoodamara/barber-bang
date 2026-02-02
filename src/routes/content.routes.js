@@ -78,6 +78,25 @@ function mapPage(p, lang) {
 }
 
 /**
+ * GET /api/content
+ * Root endpoint - returns list of active content pages (same as /pages).
+ * Public endpoint, no auth required.
+ */
+router.get("/", validate(listSchema), async (req, res) => {
+  try {
+    const pages = await ContentPage.find({ isActive: true })
+      .sort({ sortOrder: 1, createdAt: 1 })
+      .lean();
+
+    const data = pages.map((p) => mapPage(p, req.lang));
+
+    return res.json(okPayload(data));
+  } catch (e) {
+    return res.status(500).json(errorPayload(req, "INTERNAL_ERROR", "Failed to load content pages"));
+  }
+});
+
+/**
  * GET /api/content/pages?lang=he|ar
  * Returns: list of pages (Israeli required pages)
  */

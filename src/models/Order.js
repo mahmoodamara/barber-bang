@@ -257,16 +257,22 @@ const invoiceSchema = new mongoose.Schema(
       default: "none",
     },
     docId: { type: String, default: "" },
+    providerDocId: { type: String, default: "" },
+    idempotencyKey: { type: String, default: "" },
     docType: { type: String, enum: ["", "invoice", "receipt_link", "other"], default: "" },
     number: { type: String, default: "" },
     url: { type: String, default: "" },
     issuedAt: { type: Date, default: null },
     status: {
       type: String,
-      enum: ["pending", "issued", "failed"],
+      enum: ["pending", "issuing", "issued", "failed"],
       default: "pending",
     },
+    issuingAt: { type: Date, default: null },
+    lastErrorCode: { type: String, default: "" },
+    lastErrorAt: { type: Date, default: null },
     error: { type: String, default: "" },
+    snapshot: { type: mongoose.Schema.Types.Mixed, default: null },
 
     // Optional B2B fields
     customerVatId: { type: String, default: "" },
@@ -362,6 +368,18 @@ const idempotencySchema = new mongoose.Schema(
     refundKey: { type: String, default: "" },
     cancelKey: { type: String, default: "" },
     returnKey: { type: String, default: "" },
+  },
+  { _id: false }
+);
+
+/**
+ * Webhook processing lock (single-writer guard)
+ */
+const webhookSchema = new mongoose.Schema(
+  {
+    lockId: { type: String, default: "" },
+    lockedAt: { type: Date, default: null },
+    processedAt: { type: Date, default: null },
   },
   { _id: false }
 );
@@ -489,6 +507,11 @@ const orderSchema = new mongoose.Schema(
      * ✅ Analytics / idempotent counters
      */
     analytics: { type: analyticsSchema, default: () => ({}) },
+
+    /**
+     * ✅ Webhook processing lock
+     */
+    webhook: { type: webhookSchema, default: () => ({}) },
 
     /**
      * Coupon reservation (Stripe checkout)

@@ -3,7 +3,7 @@ import express from "express";
 import { z } from "zod";
 import mongoose from "mongoose";
 
-import { requireAuth, requireRole, requirePermission, PERMISSIONS } from "../middleware/auth.js";
+import { requireAuth, requirePermission, PERMISSIONS } from "../middleware/auth.js";
 import { auditAdmin } from "../middleware/audit.js";
 import { validate } from "../middleware/validate.js";
 import { sendOk, sendCreated, sendError } from "../utils/response.js";
@@ -15,38 +15,22 @@ import { Coupon } from "../models/Coupon.js";
 import { Campaign } from "../models/Campaign.js";
 import { Gift } from "../models/Gift.js";
 import { Offer } from "../models/Offer.js";
-import { Order } from "../models/Order.js";
 
-import { mapOrder } from "../utils/mapOrder.js";
-import {
-  updateOrderStatus,
-  updateOrderInvoice,
-  processRefund,
-  ORDER_STATUSES,
-} from "../services/admin-orders.service.js";
-import { getRequestId } from "../middleware/error.js";
-import {
-  triggerRepairJob,
-  getRepairJobStatus,
-} from "../jobs/reservationsRepair.job.js";
+import { triggerRepairJob, getRepairJobStatus } from "../jobs/reservationsRepair.job.js";
 
 const router = express.Router();
 
+/* ============================
+   Global Guards
+============================ */
 router.use(requireAuth());
-// Legacy admin routes - require admin role
-// For permission-based access, use dedicated routes:
-// - /api/v1/admin/orders (ORDERS_WRITE)
-// - /api/v1/admin/products (PRODUCTS_WRITE)
-// router.use(requireRole("admin", "staff")); // Removed: requirePermission handles role checks
 router.use(auditAdmin());
 
 /* ============================
-   Helpers
+   Small utilities
 ============================ */
 
-function isValidObjectId(id) {
-  return mongoose.Types.ObjectId.isValid(String(id || ""));
-}
+const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(String(id || ""));
 
 function makeErr(statusCode, code, message) {
   const err = new Error(message);
@@ -68,10 +52,22 @@ function safeNotFound(res, code = "NOT_FOUND", message = "Not found") {
   return sendError(res, 404, code, message);
 }
 
-function pickIdempotencyKey(req) {
-  const raw = String(req.headers["idempotency-key"] || "").trim();
-  return raw ? raw.slice(0, 200) : "";
-}
+const asyncHandler =
+  (fn) =>
+  async (req, res) => {
+    try {
+      await fn(req, res);
+    } catch (e) {
+      return jsonErr(res, e);
+    }
+  };
+
+const requireObjectIdParam = (paramName, code = "INVALID_ID", message = "Invalid id") =>
+  (req, _res, next) => {
+    const id = String(req.params?.[paramName] || "");
+    if (!isValidObjectId(id)) return next(makeErr(400, code, message));
+    return next();
+  };
 
 function normalizeCouponCode(code) {
   const v = String(code || "").trim();
@@ -85,11 +81,24 @@ function toDateOrNull(v) {
   return Number.isFinite(d.getTime()) ? d : null;
 }
 
-function mapBilingualPatch(b, { nameMax = 160, addressMax = 220, notesMax = 800 } = {}) {
+function mapBilingualPatch(
+  b,
+  { nameMax = 160, addressMax = 220, notesMax = 800 } = {}
+) {
   const patch = { ...b };
 
   // Trim strings
-  for (const k of ["name", "nameHe", "nameAr", "address", "addressHe", "addressAr", "notes", "notesHe", "notesAr"]) {
+  for (const k of [
+    "name",
+    "nameHe",
+    "nameAr",
+    "address",
+    "addressHe",
+    "addressAr",
+    "notes",
+    "notesHe",
+    "notesAr",
+  ]) {
     if (typeof patch[k] === "string") patch[k] = patch[k].trim();
   }
 
@@ -109,32 +118,89 @@ function mapBilingualPatch(b, { nameMax = 160, addressMax = 220, notesMax = 800 
   return patch;
 }
 
+function ensureStartBeforeEnd({ startAt, endAt }) {
+  if (!startAt || !endAt) return;
+  if (startAt.getTime() > endAt.getTime()) {
+    throw makeErr(400, "INVALID_DATE_RANGE", "startAt must be before endAt");
+  }
+}
+
 /* ============================
-   Delivery Areas (requires SETTINGS_WRITE)
+   Zod primitives
 ============================ */
 
-router.get("/delivery-areas", requirePermission(PERMISSIONS.SETTINGS_WRITE), async (req, res) => {
-  try {
-    const items = await DeliveryArea.find().sort({ createdAt: -1 });
-    return sendOk(res, items);
-  } catch (e) {
-    return jsonErr(res, e);
-  }
-});
+const objectIdParamSchema = z.object({ id: z.string().min(1) }).strict();
+
+// NOTE: coerce to accept "12" coming from forms safely; still strict allowlisting
+const money = z.coerce.number().min(0);
+const intMin1 = z.coerce.number().int().min(1);
+
+const bilingualNameCreate = z
+  .object({
+    nameHe: z.string().min(2).max(160).optional(),
+    nameAr: z.string().max(160).optional(),
+    // legacy
+    name: z.string().min(2).max(160).optional(),
+  })
+  .strict();
+
+const bilingualNameUpdate = z
+  .object({
+    nameHe: z.string().min(2).max(160).optional(),
+    nameAr: z.string().max(160).optional(),
+    name: z.string().min(2).max(160).optional(),
+  })
+  .strict();
+
+/* ============================
+   Delivery Areas (SETTINGS_WRITE)
+============================ */
 
 const deliveryAreaCreateSchema = z.object({
-  body: z.object({
-    nameHe: z.string().min(2).max(120).optional(),
-    nameAr: z.string().max(120).optional(),
-    name: z.string().min(2).max(120).optional(),
-    fee: z.number().min(0),
-    isActive: z.boolean().optional(),
-  }),
+  body: z
+    .object({
+      nameHe: z.string().min(2).max(120).optional(),
+      nameAr: z.string().max(120).optional(),
+      name: z.string().min(2).max(120).optional(), // legacy
+      fee: money,
+      isActive: z.boolean().optional(),
+    })
+    .strict(),
 });
 
-router.post("/delivery-areas", requirePermission(PERMISSIONS.SETTINGS_WRITE), validate(deliveryAreaCreateSchema), async (req, res) => {
-  try {
+const deliveryAreaUpdateSchema = z.object({
+  params: objectIdParamSchema,
+  body: z
+    .object({
+      nameHe: z.string().min(2).max(120).optional(),
+      nameAr: z.string().max(120).optional(),
+      name: z.string().min(2).max(120).optional(),
+      fee: money.optional(),
+      isActive: z.boolean().optional(),
+    })
+    .strict(),
+});
+
+const deliveryAreaDeleteSchema = z.object({
+  params: objectIdParamSchema,
+});
+
+router.get(
+  "/delivery-areas",
+  requirePermission(PERMISSIONS.SETTINGS_WRITE),
+  asyncHandler(async (_req, res) => {
+    const items = await DeliveryArea.find().sort({ createdAt: -1 }).lean();
+    return sendOk(res, items);
+  })
+);
+
+router.post(
+  "/delivery-areas",
+  requirePermission(PERMISSIONS.SETTINGS_WRITE),
+  validate(deliveryAreaCreateSchema),
+  asyncHandler(async (req, res) => {
     const b = req.validated.body;
+
     const item = await DeliveryArea.create({
       nameHe: b.nameHe || b.name || "",
       nameAr: b.nameAr || "",
@@ -142,90 +208,103 @@ router.post("/delivery-areas", requirePermission(PERMISSIONS.SETTINGS_WRITE), va
       fee: b.fee,
       isActive: b.isActive ?? true,
     });
+
     return sendCreated(res, item);
-  } catch (e) {
-    return jsonErr(res, e);
-  }
-});
+  })
+);
 
 router.put(
   "/delivery-areas/:id",
   requirePermission(PERMISSIONS.SETTINGS_WRITE),
-  validate(
-    z.object({
-      params: z.object({ id: z.string().min(1) }),
-      body: z.object({
-        nameHe: z.string().min(2).max(120).optional(),
-        nameAr: z.string().max(120).optional(),
-        name: z.string().min(2).max(120).optional(),
-        fee: z.number().min(0).optional(),
-        isActive: z.boolean().optional(),
-      }),
-    })
-  ),
-  async (req, res) => {
-    try {
-      const id = String(req.params.id || "");
-      if (!isValidObjectId(id)) throw makeErr(400, "INVALID_ID", "Invalid DeliveryArea id");
+  validate(deliveryAreaUpdateSchema),
+  requireObjectIdParam("id", "INVALID_ID", "Invalid DeliveryArea id"),
+  asyncHandler(async (req, res) => {
+    const id = String(req.params.id);
+    const patch = mapBilingualPatch(req.validated.body, { nameMax: 120 });
 
-      const patch = mapBilingualPatch(req.validated.body, { nameMax: 120 });
-      const item = await DeliveryArea.findByIdAndUpdate(id, patch, {
-        new: true,
-        runValidators: true,
-      });
+    const item = await DeliveryArea.findByIdAndUpdate(id, patch, {
+      new: true,
+      runValidators: true,
+    });
 
-      if (!item) return safeNotFound(res, "NOT_FOUND", "DeliveryArea not found");
-      return sendOk(res, item);
-    } catch (e) {
-      return jsonErr(res, e);
-    }
-  }
+    if (!item) return safeNotFound(res, "NOT_FOUND", "DeliveryArea not found");
+    return sendOk(res, item);
+  })
 );
 
-router.delete("/delivery-areas/:id", requirePermission(PERMISSIONS.SETTINGS_WRITE), async (req, res) => {
-  try {
-    const id = String(req.params.id || "");
-    if (!isValidObjectId(id)) throw makeErr(400, "INVALID_ID", "Invalid DeliveryArea id");
-
+router.delete(
+  "/delivery-areas/:id",
+  requirePermission(PERMISSIONS.SETTINGS_WRITE),
+  validate(deliveryAreaDeleteSchema),
+  requireObjectIdParam("id", "INVALID_ID", "Invalid DeliveryArea id"),
+  asyncHandler(async (req, res) => {
+    const id = String(req.params.id);
     const item = await DeliveryArea.findByIdAndDelete(id);
+
     if (!item) return safeNotFound(res, "NOT_FOUND", "DeliveryArea not found");
     return sendOk(res, { deleted: true });
-  } catch (e) {
-    return jsonErr(res, e);
-  }
-});
+  })
+);
 
 /* ============================
-   Pickup Points (requires SETTINGS_WRITE)
+   Pickup Points (SETTINGS_WRITE)
 ============================ */
 
-router.get("/pickup-points", requirePermission(PERMISSIONS.SETTINGS_WRITE), async (req, res) => {
-  try {
-    const items = await PickupPoint.find().sort({ createdAt: -1 });
-    return sendOk(res, items);
-  } catch (e) {
-    return jsonErr(res, e);
-  }
-});
-
 const pickupPointCreateSchema = z.object({
-  body: z.object({
-    nameHe: z.string().min(2).max(160).optional(),
-    nameAr: z.string().max(160).optional(),
-    addressHe: z.string().min(2).max(220).optional(),
-    addressAr: z.string().max(220).optional(),
+  body: z
+    .object({
+      nameHe: z.string().min(2).max(160).optional(),
+      nameAr: z.string().max(160).optional(),
+      addressHe: z.string().min(2).max(220).optional(),
+      addressAr: z.string().max(220).optional(),
 
-    // legacy
-    name: z.string().min(2).max(160).optional(),
-    address: z.string().min(2).max(220).optional(),
+      // legacy
+      name: z.string().min(2).max(160).optional(),
+      address: z.string().min(2).max(220).optional(),
 
-    fee: z.number().min(0),
-    isActive: z.boolean().optional(),
-  }),
+      fee: money,
+      isActive: z.boolean().optional(),
+    })
+    .strict(),
 });
 
-router.post("/pickup-points", requirePermission(PERMISSIONS.SETTINGS_WRITE), validate(pickupPointCreateSchema), async (req, res) => {
-  try {
+const pickupPointUpdateSchema = z.object({
+  params: objectIdParamSchema,
+  body: z
+    .object({
+      nameHe: z.string().min(2).max(160).optional(),
+      nameAr: z.string().max(160).optional(),
+      addressHe: z.string().min(2).max(220).optional(),
+      addressAr: z.string().max(220).optional(),
+
+      // legacy
+      name: z.string().min(2).max(160).optional(),
+      address: z.string().min(2).max(220).optional(),
+
+      fee: money.optional(),
+      isActive: z.boolean().optional(),
+    })
+    .strict(),
+});
+
+const pickupPointDeleteSchema = z.object({
+  params: objectIdParamSchema,
+});
+
+router.get(
+  "/pickup-points",
+  requirePermission(PERMISSIONS.SETTINGS_WRITE),
+  asyncHandler(async (_req, res) => {
+    const items = await PickupPoint.find().sort({ createdAt: -1 }).lean();
+    return sendOk(res, items);
+  })
+);
+
+router.post(
+  "/pickup-points",
+  requirePermission(PERMISSIONS.SETTINGS_WRITE),
+  validate(pickupPointCreateSchema),
+  asyncHandler(async (req, res) => {
     const b = req.validated.body;
 
     const item = await PickupPoint.create({
@@ -243,625 +322,647 @@ router.post("/pickup-points", requirePermission(PERMISSIONS.SETTINGS_WRITE), val
     });
 
     return sendCreated(res, item);
-  } catch (e) {
-    return jsonErr(res, e);
-  }
-});
+  })
+);
 
 router.put(
   "/pickup-points/:id",
   requirePermission(PERMISSIONS.SETTINGS_WRITE),
-  validate(
-    z.object({
-      params: z.object({ id: z.string().min(1) }),
-      body: z.object({
-        nameHe: z.string().min(2).max(160).optional(),
-        nameAr: z.string().max(160).optional(),
-        addressHe: z.string().min(2).max(220).optional(),
-        addressAr: z.string().max(220).optional(),
+  validate(pickupPointUpdateSchema),
+  requireObjectIdParam("id", "INVALID_ID", "Invalid PickupPoint id"),
+  asyncHandler(async (req, res) => {
+    const id = String(req.params.id);
+    const patch = mapBilingualPatch(req.validated.body, { nameMax: 160, addressMax: 220 });
 
-        // legacy
-        name: z.string().min(2).max(160).optional(),
-        address: z.string().min(2).max(220).optional(),
+    const item = await PickupPoint.findByIdAndUpdate(id, patch, {
+      new: true,
+      runValidators: true,
+    });
 
-        fee: z.number().min(0).optional(),
-        isActive: z.boolean().optional(),
-      }),
-    })
-  ),
-  async (req, res) => {
-    try {
-      const id = String(req.params.id || "");
-      if (!isValidObjectId(id)) throw makeErr(400, "INVALID_ID", "Invalid PickupPoint id");
-
-      const patch = mapBilingualPatch(req.validated.body, { nameMax: 160, addressMax: 220 });
-      const item = await PickupPoint.findByIdAndUpdate(id, patch, {
-        new: true,
-        runValidators: true,
-      });
-
-      if (!item) return safeNotFound(res, "NOT_FOUND", "PickupPoint not found");
-      return sendOk(res, item);
-    } catch (e) {
-      return jsonErr(res, e);
-    }
-  }
+    if (!item) return safeNotFound(res, "NOT_FOUND", "PickupPoint not found");
+    return sendOk(res, item);
+  })
 );
 
-router.delete("/pickup-points/:id", requirePermission(PERMISSIONS.SETTINGS_WRITE), async (req, res) => {
-  try {
-    const id = String(req.params.id || "");
-    if (!isValidObjectId(id)) throw makeErr(400, "INVALID_ID", "Invalid PickupPoint id");
-
+router.delete(
+  "/pickup-points/:id",
+  requirePermission(PERMISSIONS.SETTINGS_WRITE),
+  validate(pickupPointDeleteSchema),
+  requireObjectIdParam("id", "INVALID_ID", "Invalid PickupPoint id"),
+  asyncHandler(async (req, res) => {
+    const id = String(req.params.id);
     const item = await PickupPoint.findByIdAndDelete(id);
+
     if (!item) return safeNotFound(res, "NOT_FOUND", "PickupPoint not found");
     return sendOk(res, { deleted: true });
-  } catch (e) {
-    return jsonErr(res, e);
-  }
-});
+  })
+);
 
 /* ============================
-   Store Pickup Config (requires SETTINGS_WRITE)
+   Store Pickup Config (SETTINGS_WRITE) - Singleton
 ============================ */
 
-router.get("/store-pickup", requirePermission(PERMISSIONS.SETTINGS_WRITE), async (req, res) => {
-  try {
-    const cfg = await StorePickupConfig.findOne().sort({ createdAt: -1 });
-    return sendOk(res, cfg || {
-      isEnabled: true,
-      fee: 0,
-      addressHe: "",
-      addressAr: "",
-      notesHe: "",
-      notesAr: "",
+const storePickupUpdateSchema = z.object({
+  body: z
+    .object({
+      isEnabled: z.boolean().optional(),
+      fee: money.optional(),
+      addressHe: z.string().max(220).optional(),
+      addressAr: z.string().max(220).optional(),
+      notesHe: z.string().max(800).optional(),
+      notesAr: z.string().max(800).optional(),
+
       // legacy
-      address: "",
-      notes: "",
-    });
-  } catch (e) {
-    return jsonErr(res, e);
-  }
+      address: z.string().max(220).optional(),
+      notes: z.string().max(800).optional(),
+    })
+    .strict(),
 });
+
+router.get(
+  "/store-pickup",
+  requirePermission(PERMISSIONS.SETTINGS_WRITE),
+  asyncHandler(async (_req, res) => {
+    const cfg = await StorePickupConfig.findOne().sort({ createdAt: -1 }).lean();
+    return sendOk(
+      res,
+      cfg || {
+        isEnabled: true,
+        fee: 0,
+        addressHe: "",
+        addressAr: "",
+        notesHe: "",
+        notesAr: "",
+        // legacy
+        address: "",
+        notes: "",
+      }
+    );
+  })
+);
 
 router.put(
   "/store-pickup",
   requirePermission(PERMISSIONS.SETTINGS_WRITE),
-  validate(
-    z.object({
-      body: z.object({
-        isEnabled: z.boolean().optional(),
-        fee: z.number().min(0).optional(),
-        addressHe: z.string().max(220).optional(),
-        addressAr: z.string().max(220).optional(),
-        notesHe: z.string().max(800).optional(),
-        notesAr: z.string().max(800).optional(),
+  validate(storePickupUpdateSchema),
+  asyncHandler(async (req, res) => {
+    const patch = mapBilingualPatch(req.validated.body, { addressMax: 220, notesMax: 800 });
 
-        // legacy
-        address: z.string().max(220).optional(),
-        notes: z.string().max(800).optional(),
-      }),
-    })
-  ),
-  async (req, res) => {
-    try {
-      const patch = mapBilingualPatch(req.validated.body, { addressMax: 220, notesMax: 800 });
-
-      const cfg = await StorePickupConfig.findOne().sort({ createdAt: -1 });
-      if (!cfg) {
-        const created = await StorePickupConfig.create(patch);
-        return sendOk(res, created);
-      }
-
-      Object.assign(cfg, patch);
-      await cfg.save();
-
-      return sendOk(res, cfg);
-    } catch (e) {
-      return jsonErr(res, e);
+    const cfg = await StorePickupConfig.findOne().sort({ createdAt: -1 });
+    if (!cfg) {
+      const created = await StorePickupConfig.create(patch);
+      return sendOk(res, created);
     }
-  }
+
+    Object.assign(cfg, patch);
+    await cfg.save();
+
+    return sendOk(res, cfg);
+  })
 );
 
 /* ============================
-   Coupons (requires PROMOS_WRITE)
+   Coupons (PROMOS_WRITE)
 ============================ */
 
-router.get("/coupons", requirePermission(PERMISSIONS.PROMOS_WRITE), async (req, res) => {
-  try {
-    const items = await Coupon.find().sort({ createdAt: -1 });
-    return sendOk(res, items);
-  } catch (e) {
-    return jsonErr(res, e);
-  }
+const couponCreateSchema = z.object({
+  body: z
+    .object({
+      code: z.string().min(2).max(40),
+      type: z.enum(["percent", "fixed"]),
+      value: money,
+      minOrderTotal: money.optional(),
+      maxDiscount: money.nullable().optional(),
+      usageLimit: intMin1.nullable().optional(),
+      startAt: z.string().datetime().nullable().optional(),
+      endAt: z.string().datetime().nullable().optional(),
+      isActive: z.boolean().optional(),
+    })
+    .strict(),
 });
+
+const couponUpdateSchema = z.object({
+  params: objectIdParamSchema,
+  body: z
+    .object({
+      code: z.string().min(2).max(40).optional(),
+      type: z.enum(["percent", "fixed"]).optional(),
+      value: money.optional(),
+      minOrderTotal: money.optional(),
+      maxDiscount: money.nullable().optional(),
+      usageLimit: intMin1.nullable().optional(),
+      startAt: z.string().datetime().nullable().optional(),
+      endAt: z.string().datetime().nullable().optional(),
+      isActive: z.boolean().optional(),
+    })
+    .strict(),
+});
+
+const couponDeleteSchema = z.object({
+  params: objectIdParamSchema,
+});
+
+router.get(
+  "/coupons",
+  requirePermission(PERMISSIONS.PROMOS_WRITE),
+  asyncHandler(async (_req, res) => {
+    const items = await Coupon.find().sort({ createdAt: -1 }).lean();
+    return sendOk(res, items);
+  })
+);
 
 router.post(
   "/coupons",
   requirePermission(PERMISSIONS.PROMOS_WRITE),
-  validate(
-    z.object({
-      body: z.object({
-        code: z.string().min(2).max(40),
-        type: z.enum(["percent", "fixed"]),
-        value: z.number().min(0),
-        minOrderTotal: z.number().min(0).optional(),
-        maxDiscount: z.number().min(0).nullable().optional(),
-        usageLimit: z.number().min(1).nullable().optional(),
-        startAt: z.string().datetime().nullable().optional(),
-        endAt: z.string().datetime().nullable().optional(),
-        isActive: z.boolean().optional(),
-      }),
-    })
-  ),
-  async (req, res) => {
-    try {
-      const b = req.validated.body;
-      const item = await Coupon.create({
-        code: normalizeCouponCode(b.code),
-        type: b.type,
-        value: b.value,
-        minOrderTotal: b.minOrderTotal || 0,
-        maxDiscount: b.maxDiscount ?? null,
-        usageLimit: b.usageLimit ?? null,
-        startAt: b.startAt ? toDateOrNull(b.startAt) : null,
-        endAt: b.endAt ? toDateOrNull(b.endAt) : null,
-        isActive: b.isActive ?? true,
-      });
-      return sendCreated(res, item);
-    } catch (e) {
-      return jsonErr(res, e);
-    }
-  }
+  validate(couponCreateSchema),
+  asyncHandler(async (req, res) => {
+    const b = req.validated.body;
+
+    const startAt = b.startAt ? toDateOrNull(b.startAt) : null;
+    const endAt = b.endAt ? toDateOrNull(b.endAt) : null;
+    ensureStartBeforeEnd({ startAt, endAt });
+
+    const item = await Coupon.create({
+      code: normalizeCouponCode(b.code),
+      type: b.type,
+      value: b.value,
+      minOrderTotal: b.minOrderTotal ?? 0,
+      maxDiscount: b.maxDiscount ?? null,
+      usageLimit: b.usageLimit ?? null,
+      startAt,
+      endAt,
+      isActive: b.isActive ?? true,
+    });
+
+    return sendCreated(res, item);
+  })
 );
+
+const updateCouponHandler = asyncHandler(async (req, res) => {
+  const id = String(req.params.id);
+  const patch = { ...req.validated.body };
+
+  if (patch.code) patch.code = normalizeCouponCode(patch.code);
+
+  if ("startAt" in patch) patch.startAt = patch.startAt ? toDateOrNull(patch.startAt) : null;
+  if ("endAt" in patch) patch.endAt = patch.endAt ? toDateOrNull(patch.endAt) : null;
+
+  ensureStartBeforeEnd({ startAt: patch.startAt ?? null, endAt: patch.endAt ?? null });
+
+  const item = await Coupon.findByIdAndUpdate(id, patch, { new: true, runValidators: true });
+  if (!item) return safeNotFound(res, "NOT_FOUND", "Coupon not found");
+
+  return sendOk(res, item);
+});
 
 router.put(
   "/coupons/:id",
   requirePermission(PERMISSIONS.PROMOS_WRITE),
-  validate(
-    z.object({
-      params: z.object({ id: z.string().min(1) }),
-      body: z.object({
-        code: z.string().min(2).max(40).optional(),
-        type: z.enum(["percent", "fixed"]).optional(),
-        value: z.number().min(0).optional(),
-        minOrderTotal: z.number().min(0).optional(),
-        maxDiscount: z.number().min(0).nullable().optional(),
-        usageLimit: z.number().min(1).nullable().optional(),
-        startAt: z.string().datetime().nullable().optional(),
-        endAt: z.string().datetime().nullable().optional(),
-        isActive: z.boolean().optional(),
-      }),
-    })
-  ),
-  async (req, res) => {
-    try {
-      const id = String(req.params.id || "");
-      if (!isValidObjectId(id)) throw makeErr(400, "INVALID_ID", "Invalid Coupon id");
-
-      const patch = { ...req.validated.body };
-      if (patch.code) patch.code = normalizeCouponCode(patch.code);
-      if ("startAt" in patch) patch.startAt = patch.startAt ? toDateOrNull(patch.startAt) : null;
-      if ("endAt" in patch) patch.endAt = patch.endAt ? toDateOrNull(patch.endAt) : null;
-
-      const item = await Coupon.findByIdAndUpdate(id, patch, { new: true, runValidators: true });
-      if (!item) return safeNotFound(res, "NOT_FOUND", "Coupon not found");
-
-      return sendOk(res, item);
-    } catch (e) {
-      return jsonErr(res, e);
-    }
-  }
+  validate(couponUpdateSchema),
+  requireObjectIdParam("id", "INVALID_ID", "Invalid Coupon id"),
+  updateCouponHandler
 );
 
-router.delete("/coupons/:id", requirePermission(PERMISSIONS.PROMOS_WRITE), async (req, res) => {
-  try {
-    const id = String(req.params.id || "");
-    if (!isValidObjectId(id)) throw makeErr(400, "INVALID_ID", "Invalid Coupon id");
+router.patch(
+  "/coupons/:id",
+  requirePermission(PERMISSIONS.PROMOS_WRITE),
+  validate(couponUpdateSchema),
+  requireObjectIdParam("id", "INVALID_ID", "Invalid Coupon id"),
+  updateCouponHandler
+);
 
+router.delete(
+  "/coupons/:id",
+  requirePermission(PERMISSIONS.PROMOS_WRITE),
+  validate(couponDeleteSchema),
+  requireObjectIdParam("id", "INVALID_ID", "Invalid Coupon id"),
+  asyncHandler(async (req, res) => {
+    const id = String(req.params.id);
     const item = await Coupon.findByIdAndDelete(id);
     if (!item) return safeNotFound(res, "NOT_FOUND", "Coupon not found");
-
     return sendOk(res, { deleted: true });
-  } catch (e) {
-    return jsonErr(res, e);
-  }
-});
+  })
+);
 
 /* ============================
-   Campaigns (requires PROMOS_WRITE)
+   Campaigns (PROMOS_WRITE)
 ============================ */
 
-router.get("/campaigns", requirePermission(PERMISSIONS.PROMOS_WRITE), async (req, res) => {
-  try {
-    const items = await Campaign.find().sort({ createdAt: -1 });
-    return sendOk(res, items);
-  } catch (e) {
-    return jsonErr(res, e);
-  }
+const campaignCreateSchema = z.object({
+  body: z
+    .object({
+      nameHe: z.string().min(2).max(160).optional(),
+      nameAr: z.string().max(160).optional(),
+      name: z.string().min(2).max(160).optional(),
+      type: z.enum(["percent", "fixed"]),
+      value: money,
+      appliesTo: z.enum(["all", "products", "categories"]).optional(),
+      productIds: z.array(z.string().min(1)).optional(),
+      categoryIds: z.array(z.string().min(1)).optional(),
+      startAt: z.string().datetime().nullable().optional(),
+      endAt: z.string().datetime().nullable().optional(),
+      isActive: z.boolean().optional(),
+    })
+    .strict(),
 });
+
+const campaignUpdateSchema = z.object({
+  params: objectIdParamSchema,
+  body: z
+    .object({
+      nameHe: z.string().min(2).max(160).optional(),
+      nameAr: z.string().max(160).optional(),
+      name: z.string().min(2).max(160).optional(),
+      type: z.enum(["percent", "fixed"]).optional(),
+      value: money.optional(),
+      appliesTo: z.enum(["all", "products", "categories"]).optional(),
+      productIds: z.array(z.string().min(1)).optional(),
+      categoryIds: z.array(z.string().min(1)).optional(),
+      startAt: z.string().datetime().nullable().optional(),
+      endAt: z.string().datetime().nullable().optional(),
+      isActive: z.boolean().optional(),
+    })
+    .strict(),
+});
+
+const campaignDeleteSchema = z.object({
+  params: objectIdParamSchema,
+});
+
+router.get(
+  "/campaigns",
+  requirePermission(PERMISSIONS.PROMOS_WRITE),
+  asyncHandler(async (_req, res) => {
+    const items = await Campaign.find().sort({ createdAt: -1 }).lean();
+    return sendOk(res, items);
+  })
+);
 
 router.post(
   "/campaigns",
   requirePermission(PERMISSIONS.PROMOS_WRITE),
-  validate(
-    z.object({
-      body: z.object({
-        nameHe: z.string().min(2).max(160).optional(),
-        nameAr: z.string().max(160).optional(),
-        name: z.string().min(2).max(160).optional(),
-        type: z.enum(["percent", "fixed"]),
-        value: z.number().min(0),
-        appliesTo: z.enum(["all", "products", "categories"]).optional(),
-        productIds: z.array(z.string().min(1)).optional(),
-        categoryIds: z.array(z.string().min(1)).optional(),
-        startAt: z.string().datetime().nullable().optional(),
-        endAt: z.string().datetime().nullable().optional(),
-        isActive: z.boolean().optional(),
-      }),
-    })
-  ),
-  async (req, res) => {
-    try {
-      const b = req.validated.body;
-      const item = await Campaign.create({
-        nameHe: b.nameHe || b.name || "",
-        nameAr: b.nameAr || "",
-        name: b.name || b.nameHe || "",
-        type: b.type,
-        value: b.value,
-        appliesTo: b.appliesTo || "all",
-        productIds: b.productIds || [],
-        categoryIds: b.categoryIds || [],
-        startAt: b.startAt ? toDateOrNull(b.startAt) : null,
-        endAt: b.endAt ? toDateOrNull(b.endAt) : null,
-        isActive: b.isActive ?? true,
-      });
-      return sendCreated(res, item);
-    } catch (e) {
-      return jsonErr(res, e);
-    }
-  }
+  validate(campaignCreateSchema),
+  asyncHandler(async (req, res) => {
+    const b = req.validated.body;
+
+    const startAt = b.startAt ? toDateOrNull(b.startAt) : null;
+    const endAt = b.endAt ? toDateOrNull(b.endAt) : null;
+    ensureStartBeforeEnd({ startAt, endAt });
+
+    const item = await Campaign.create({
+      nameHe: b.nameHe || b.name || "",
+      nameAr: b.nameAr || "",
+      name: b.name || b.nameHe || "",
+      type: b.type,
+      value: b.value,
+      appliesTo: b.appliesTo || "all",
+      productIds: b.productIds || [],
+      categoryIds: b.categoryIds || [],
+      startAt,
+      endAt,
+      isActive: b.isActive ?? true,
+    });
+
+    return sendCreated(res, item);
+  })
 );
+
+const updateCampaignHandler = asyncHandler(async (req, res) => {
+  const id = String(req.params.id);
+  const patch = mapBilingualPatch(req.validated.body, { nameMax: 160 });
+
+  if ("startAt" in patch) patch.startAt = patch.startAt ? toDateOrNull(patch.startAt) : null;
+  if ("endAt" in patch) patch.endAt = patch.endAt ? toDateOrNull(patch.endAt) : null;
+
+  ensureStartBeforeEnd({ startAt: patch.startAt ?? null, endAt: patch.endAt ?? null });
+
+  const item = await Campaign.findByIdAndUpdate(id, patch, { new: true, runValidators: true });
+  if (!item) return safeNotFound(res, "NOT_FOUND", "Campaign not found");
+
+  return sendOk(res, item);
+});
 
 router.put(
   "/campaigns/:id",
   requirePermission(PERMISSIONS.PROMOS_WRITE),
-  validate(
-    z.object({
-      params: z.object({ id: z.string().min(1) }),
-      body: z.object({
-        nameHe: z.string().min(2).max(160).optional(),
-        nameAr: z.string().max(160).optional(),
-        name: z.string().min(2).max(160).optional(),
-        type: z.enum(["percent", "fixed"]).optional(),
-        value: z.number().min(0).optional(),
-        appliesTo: z.enum(["all", "products", "categories"]).optional(),
-        productIds: z.array(z.string().min(1)).optional(),
-        categoryIds: z.array(z.string().min(1)).optional(),
-        startAt: z.string().datetime().nullable().optional(),
-        endAt: z.string().datetime().nullable().optional(),
-        isActive: z.boolean().optional(),
-      }),
-    })
-  ),
-  async (req, res) => {
-    try {
-      const id = String(req.params.id || "");
-      if (!isValidObjectId(id)) throw makeErr(400, "INVALID_ID", "Invalid Campaign id");
-
-      const patch = mapBilingualPatch(req.validated.body, { nameMax: 160 });
-      if ("startAt" in patch) patch.startAt = patch.startAt ? toDateOrNull(patch.startAt) : null;
-      if ("endAt" in patch) patch.endAt = patch.endAt ? toDateOrNull(patch.endAt) : null;
-
-      const item = await Campaign.findByIdAndUpdate(id, patch, { new: true, runValidators: true });
-      if (!item) return safeNotFound(res, "NOT_FOUND", "Campaign not found");
-
-      return sendOk(res, item);
-    } catch (e) {
-      return jsonErr(res, e);
-    }
-  }
+  validate(campaignUpdateSchema),
+  requireObjectIdParam("id", "INVALID_ID", "Invalid Campaign id"),
+  updateCampaignHandler
 );
 
-router.delete("/campaigns/:id", requirePermission(PERMISSIONS.PROMOS_WRITE), async (req, res) => {
-  try {
-    const id = String(req.params.id || "");
-    if (!isValidObjectId(id)) throw makeErr(400, "INVALID_ID", "Invalid Campaign id");
+router.patch(
+  "/campaigns/:id",
+  requirePermission(PERMISSIONS.PROMOS_WRITE),
+  validate(campaignUpdateSchema),
+  requireObjectIdParam("id", "INVALID_ID", "Invalid Campaign id"),
+  updateCampaignHandler
+);
 
+router.delete(
+  "/campaigns/:id",
+  requirePermission(PERMISSIONS.PROMOS_WRITE),
+  validate(campaignDeleteSchema),
+  requireObjectIdParam("id", "INVALID_ID", "Invalid Campaign id"),
+  asyncHandler(async (req, res) => {
+    const id = String(req.params.id);
     const item = await Campaign.findByIdAndDelete(id);
     if (!item) return safeNotFound(res, "NOT_FOUND", "Campaign not found");
-
     return sendOk(res, { deleted: true });
-  } catch (e) {
-    return jsonErr(res, e);
-  }
-});
+  })
+);
 
 /* ============================
-   Gifts (requires PROMOS_WRITE)
+   Gifts (PROMOS_WRITE)
 ============================ */
 
-router.get("/gifts", requirePermission(PERMISSIONS.PROMOS_WRITE), async (req, res) => {
-  try {
-    const items = await Gift.find().sort({ createdAt: -1 });
-    return sendOk(res, items);
-  } catch (e) {
-    return jsonErr(res, e);
-  }
+const giftCreateSchema = z.object({
+  body: z
+    .object({
+      nameHe: z.string().min(2).max(160).optional(),
+      nameAr: z.string().max(160).optional(),
+      name: z.string().min(2).max(160).optional(),
+      giftProductId: z.string().min(1),
+      minOrderTotal: money.nullable().optional(),
+      requiredProductId: z.string().min(1).nullable().optional(),
+      requiredCategoryId: z.string().min(1).nullable().optional(),
+      startAt: z.string().datetime().nullable().optional(),
+      endAt: z.string().datetime().nullable().optional(),
+      isActive: z.boolean().optional(),
+    })
+    .strict(),
 });
+
+const giftUpdateSchema = z.object({
+  params: objectIdParamSchema,
+  body: z
+    .object({
+      nameHe: z.string().min(2).max(160).optional(),
+      nameAr: z.string().max(160).optional(),
+      name: z.string().min(2).max(160).optional(),
+      giftProductId: z.string().min(1).optional(),
+      minOrderTotal: money.nullable().optional(),
+      requiredProductId: z.string().min(1).nullable().optional(),
+      requiredCategoryId: z.string().min(1).nullable().optional(),
+      startAt: z.string().datetime().nullable().optional(),
+      endAt: z.string().datetime().nullable().optional(),
+      isActive: z.boolean().optional(),
+    })
+    .strict(),
+});
+
+const giftDeleteSchema = z.object({
+  params: objectIdParamSchema,
+});
+
+router.get(
+  "/gifts",
+  requirePermission(PERMISSIONS.PROMOS_WRITE),
+  asyncHandler(async (_req, res) => {
+    const items = await Gift.find().sort({ createdAt: -1 }).lean();
+    return sendOk(res, items);
+  })
+);
 
 router.post(
   "/gifts",
   requirePermission(PERMISSIONS.PROMOS_WRITE),
-  validate(
-    z.object({
-      body: z.object({
-        nameHe: z.string().min(2).max(160).optional(),
-        nameAr: z.string().max(160).optional(),
-        name: z.string().min(2).max(160).optional(),
-        giftProductId: z.string().min(1),
-        minOrderTotal: z.number().min(0).nullable().optional(),
-        requiredProductId: z.string().min(1).nullable().optional(),
-        requiredCategoryId: z.string().min(1).nullable().optional(),
-        startAt: z.string().datetime().nullable().optional(),
-        endAt: z.string().datetime().nullable().optional(),
-        isActive: z.boolean().optional(),
-      }),
-    })
-  ),
-  async (req, res) => {
-    try {
-      const b = req.validated.body;
-      const item = await Gift.create({
-        nameHe: b.nameHe || b.name || "",
-        nameAr: b.nameAr || "",
-        name: b.name || b.nameHe || "",
-        giftProductId: b.giftProductId,
-        minOrderTotal: b.minOrderTotal ?? null,
-        requiredProductId: b.requiredProductId ?? null,
-        requiredCategoryId: b.requiredCategoryId ?? null,
-        startAt: b.startAt ? toDateOrNull(b.startAt) : null,
-        endAt: b.endAt ? toDateOrNull(b.endAt) : null,
-        isActive: b.isActive ?? true,
-      });
-      return sendCreated(res, item);
-    } catch (e) {
-      return jsonErr(res, e);
-    }
-  }
+  validate(giftCreateSchema),
+  asyncHandler(async (req, res) => {
+    const b = req.validated.body;
+
+    const startAt = b.startAt ? toDateOrNull(b.startAt) : null;
+    const endAt = b.endAt ? toDateOrNull(b.endAt) : null;
+    ensureStartBeforeEnd({ startAt, endAt });
+
+    const item = await Gift.create({
+      nameHe: b.nameHe || b.name || "",
+      nameAr: b.nameAr || "",
+      name: b.name || b.nameHe || "",
+      giftProductId: b.giftProductId,
+      minOrderTotal: b.minOrderTotal ?? null,
+      requiredProductId: b.requiredProductId ?? null,
+      requiredCategoryId: b.requiredCategoryId ?? null,
+      startAt,
+      endAt,
+      isActive: b.isActive ?? true,
+    });
+
+    return sendCreated(res, item);
+  })
 );
+
+const updateGiftHandler = asyncHandler(async (req, res) => {
+  const id = String(req.params.id);
+  const patch = mapBilingualPatch(req.validated.body, { nameMax: 160 });
+
+  if ("startAt" in patch) patch.startAt = patch.startAt ? toDateOrNull(patch.startAt) : null;
+  if ("endAt" in patch) patch.endAt = patch.endAt ? toDateOrNull(patch.endAt) : null;
+
+  ensureStartBeforeEnd({ startAt: patch.startAt ?? null, endAt: patch.endAt ?? null });
+
+  const item = await Gift.findByIdAndUpdate(id, patch, { new: true, runValidators: true });
+  if (!item) return safeNotFound(res, "NOT_FOUND", "Gift not found");
+
+  return sendOk(res, item);
+});
 
 router.put(
   "/gifts/:id",
   requirePermission(PERMISSIONS.PROMOS_WRITE),
-  validate(
-    z.object({
-      params: z.object({ id: z.string().min(1) }),
-      body: z.object({
-        nameHe: z.string().min(2).max(160).optional(),
-        nameAr: z.string().max(160).optional(),
-        name: z.string().min(2).max(160).optional(),
-        giftProductId: z.string().min(1).optional(),
-        minOrderTotal: z.number().min(0).nullable().optional(),
-        requiredProductId: z.string().min(1).nullable().optional(),
-        requiredCategoryId: z.string().min(1).nullable().optional(),
-        startAt: z.string().datetime().nullable().optional(),
-        endAt: z.string().datetime().nullable().optional(),
-        isActive: z.boolean().optional(),
-      }),
-    })
-  ),
-  async (req, res) => {
-    try {
-      const id = String(req.params.id || "");
-      if (!isValidObjectId(id)) throw makeErr(400, "INVALID_ID", "Invalid Gift id");
-
-      const patch = mapBilingualPatch(req.validated.body, { nameMax: 160 });
-      if ("startAt" in patch) patch.startAt = patch.startAt ? toDateOrNull(patch.startAt) : null;
-      if ("endAt" in patch) patch.endAt = patch.endAt ? toDateOrNull(patch.endAt) : null;
-
-      const item = await Gift.findByIdAndUpdate(id, patch, { new: true, runValidators: true });
-      if (!item) return safeNotFound(res, "NOT_FOUND", "Gift not found");
-
-      return sendOk(res, item);
-    } catch (e) {
-      return jsonErr(res, e);
-    }
-  }
+  validate(giftUpdateSchema),
+  requireObjectIdParam("id", "INVALID_ID", "Invalid Gift id"),
+  updateGiftHandler
 );
 
-router.delete("/gifts/:id", requirePermission(PERMISSIONS.PROMOS_WRITE), async (req, res) => {
-  try {
-    const id = String(req.params.id || "");
-    if (!isValidObjectId(id)) throw makeErr(400, "INVALID_ID", "Invalid Gift id");
+router.patch(
+  "/gifts/:id",
+  requirePermission(PERMISSIONS.PROMOS_WRITE),
+  validate(giftUpdateSchema),
+  requireObjectIdParam("id", "INVALID_ID", "Invalid Gift id"),
+  updateGiftHandler
+);
 
+router.delete(
+  "/gifts/:id",
+  requirePermission(PERMISSIONS.PROMOS_WRITE),
+  validate(giftDeleteSchema),
+  requireObjectIdParam("id", "INVALID_ID", "Invalid Gift id"),
+  asyncHandler(async (req, res) => {
+    const id = String(req.params.id);
     const item = await Gift.findByIdAndDelete(id);
     if (!item) return safeNotFound(res, "NOT_FOUND", "Gift not found");
-
     return sendOk(res, { deleted: true });
-  } catch (e) {
-    return jsonErr(res, e);
-  }
-});
+  })
+);
 
 /* ============================
-   Offers (requires PROMOS_WRITE)
+   Offers (PROMOS_WRITE)
 ============================ */
 
-router.get("/offers", requirePermission(PERMISSIONS.PROMOS_WRITE), async (req, res) => {
-  try {
-    const items = await Offer.find().sort({ priority: 1, createdAt: -1 });
-    return sendOk(res, items);
-  } catch (e) {
-    return jsonErr(res, e);
-  }
+const offerCreateSchema = z.object({
+  body: z
+    .object({
+      nameHe: z.string().min(2).max(160).optional(),
+      nameAr: z.string().max(160).optional(),
+      name: z.string().min(2).max(160).optional(),
+      type: z.enum(["PERCENT_OFF", "FIXED_OFF", "BUY_X_GET_Y", "FREE_SHIPPING"]),
+      value: money.optional(),
+      minTotal: money.optional(),
+      productIds: z.array(z.string().min(1)).optional(),
+      categoryIds: z.array(z.string().min(1)).optional(),
+      buyProductId: z.string().min(1).nullable().optional(),
+      buyQty: intMin1.optional(),
+      getProductId: z.string().min(1).nullable().optional(),
+      getQty: intMin1.optional(),
+      maxDiscount: money.optional(),
+      stackable: z.boolean().optional(),
+      priority: z.coerce.number().int().min(0).optional(),
+      startAt: z.string().datetime().nullable().optional(),
+      endAt: z.string().datetime().nullable().optional(),
+      isActive: z.boolean().optional(),
+    })
+    .strict(),
 });
+
+const offerUpdateSchema = z.object({
+  params: objectIdParamSchema,
+  body: z
+    .object({
+      nameHe: z.string().min(2).max(160).optional(),
+      nameAr: z.string().max(160).optional(),
+      name: z.string().min(2).max(160).optional(),
+      type: z.enum(["PERCENT_OFF", "FIXED_OFF", "BUY_X_GET_Y", "FREE_SHIPPING"]).optional(),
+      value: money.optional(),
+      minTotal: money.optional(),
+      productIds: z.array(z.string().min(1)).optional(),
+      categoryIds: z.array(z.string().min(1)).optional(),
+      buyProductId: z.string().min(1).nullable().optional(),
+      buyQty: intMin1.optional(),
+      getProductId: z.string().min(1).nullable().optional(),
+      getQty: intMin1.optional(),
+      maxDiscount: money.optional(),
+      stackable: z.boolean().optional(),
+      priority: z.coerce.number().int().min(0).optional(),
+      startAt: z.string().datetime().nullable().optional(),
+      endAt: z.string().datetime().nullable().optional(),
+      isActive: z.boolean().optional(),
+    })
+    .strict(),
+});
+
+const offerDeleteSchema = z.object({
+  params: objectIdParamSchema,
+});
+
+router.get(
+  "/offers",
+  requirePermission(PERMISSIONS.PROMOS_WRITE),
+  asyncHandler(async (_req, res) => {
+    const items = await Offer.find().sort({ priority: 1, createdAt: -1 }).lean();
+    return sendOk(res, items);
+  })
+);
 
 router.post(
   "/offers",
   requirePermission(PERMISSIONS.PROMOS_WRITE),
-  validate(
-    z.object({
-      body: z.object({
-        nameHe: z.string().min(2).max(160).optional(),
-        nameAr: z.string().max(160).optional(),
-        name: z.string().min(2).max(160).optional(),
-        type: z.enum(["PERCENT_OFF", "FIXED_OFF", "BUY_X_GET_Y", "FREE_SHIPPING"]),
-        value: z.number().min(0).optional(),
-        minTotal: z.number().min(0).optional(),
-        productIds: z.array(z.string().min(1)).optional(),
-        categoryIds: z.array(z.string().min(1)).optional(),
-        buyProductId: z.string().min(1).nullable().optional(),
-        buyQty: z.number().int().min(1).optional(),
-        getProductId: z.string().min(1).nullable().optional(),
-        getQty: z.number().int().min(1).optional(),
-        maxDiscount: z.number().min(0).optional(),
-        stackable: z.boolean().optional(),
-        priority: z.number().int().min(0).optional(),
-        startAt: z.string().datetime().nullable().optional(),
-        endAt: z.string().datetime().nullable().optional(),
-        isActive: z.boolean().optional(),
-      }),
-    })
-  ),
-  async (req, res) => {
-    try {
-      const b = req.validated.body;
-      const item = await Offer.create({
-        nameHe: b.nameHe || b.name || "",
-        nameAr: b.nameAr || "",
-        name: b.name || b.nameHe || "",
-        type: b.type,
-        value: b.value ?? 0,
-        minTotal: b.minTotal ?? 0,
-        productIds: b.productIds || [],
-        categoryIds: b.categoryIds || [],
-        buyProductId: b.buyProductId ?? null,
-        buyQty: b.buyQty ?? 1,
-        getProductId: b.getProductId ?? null,
-        getQty: b.getQty ?? 1,
-        maxDiscount: b.maxDiscount ?? 0,
-        stackable: b.stackable ?? true,
-        priority: b.priority ?? 100,
-        startAt: b.startAt ? toDateOrNull(b.startAt) : null,
-        endAt: b.endAt ? toDateOrNull(b.endAt) : null,
-        isActive: b.isActive ?? true,
-      });
-      return sendCreated(res, item);
-    } catch (e) {
-      return jsonErr(res, e);
-    }
-  }
+  validate(offerCreateSchema),
+  asyncHandler(async (req, res) => {
+    const b = req.validated.body;
+
+    const startAt = b.startAt ? toDateOrNull(b.startAt) : null;
+    const endAt = b.endAt ? toDateOrNull(b.endAt) : null;
+    ensureStartBeforeEnd({ startAt, endAt });
+
+    const item = await Offer.create({
+      nameHe: b.nameHe || b.name || "",
+      nameAr: b.nameAr || "",
+      name: b.name || b.nameHe || "",
+      type: b.type,
+      value: b.value ?? 0,
+      minTotal: b.minTotal ?? 0,
+      productIds: b.productIds || [],
+      categoryIds: b.categoryIds || [],
+      buyProductId: b.buyProductId ?? null,
+      buyQty: b.buyQty ?? 1,
+      getProductId: b.getProductId ?? null,
+      getQty: b.getQty ?? 1,
+      maxDiscount: b.maxDiscount ?? 0,
+      stackable: b.stackable ?? true,
+      priority: b.priority ?? 100,
+      startAt,
+      endAt,
+      isActive: b.isActive ?? true,
+    });
+
+    return sendCreated(res, item);
+  })
 );
+
+const updateOfferHandler = asyncHandler(async (req, res) => {
+  const id = String(req.params.id);
+  const patch = mapBilingualPatch(req.validated.body, { nameMax: 160 });
+
+  if ("startAt" in patch) patch.startAt = patch.startAt ? toDateOrNull(patch.startAt) : null;
+  if ("endAt" in patch) patch.endAt = patch.endAt ? toDateOrNull(patch.endAt) : null;
+
+  ensureStartBeforeEnd({ startAt: patch.startAt ?? null, endAt: patch.endAt ?? null });
+
+  const item = await Offer.findByIdAndUpdate(id, patch, { new: true, runValidators: true });
+  if (!item) return safeNotFound(res, "NOT_FOUND", "Offer not found");
+
+  return sendOk(res, item);
+});
 
 router.put(
   "/offers/:id",
   requirePermission(PERMISSIONS.PROMOS_WRITE),
-  validate(
-    z.object({
-      params: z.object({ id: z.string().min(1) }),
-      body: z.object({
-        nameHe: z.string().min(2).max(160).optional(),
-        nameAr: z.string().max(160).optional(),
-        name: z.string().min(2).max(160).optional(),
-        type: z.enum(["PERCENT_OFF", "FIXED_OFF", "BUY_X_GET_Y", "FREE_SHIPPING"]).optional(),
-        value: z.number().min(0).optional(),
-        minTotal: z.number().min(0).optional(),
-        productIds: z.array(z.string().min(1)).optional(),
-        categoryIds: z.array(z.string().min(1)).optional(),
-        buyProductId: z.string().min(1).nullable().optional(),
-        buyQty: z.number().int().min(1).optional(),
-        getProductId: z.string().min(1).nullable().optional(),
-        getQty: z.number().int().min(1).optional(),
-        maxDiscount: z.number().min(0).optional(),
-        stackable: z.boolean().optional(),
-        priority: z.number().int().min(0).optional(),
-        startAt: z.string().datetime().nullable().optional(),
-        endAt: z.string().datetime().nullable().optional(),
-        isActive: z.boolean().optional(),
-      }),
-    })
-  ),
-  async (req, res) => {
-    try {
-      const id = String(req.params.id || "");
-      if (!isValidObjectId(id)) throw makeErr(400, "INVALID_ID", "Invalid Offer id");
-
-      const patch = mapBilingualPatch(req.validated.body, { nameMax: 160 });
-      if ("startAt" in patch) patch.startAt = patch.startAt ? toDateOrNull(patch.startAt) : null;
-      if ("endAt" in patch) patch.endAt = patch.endAt ? toDateOrNull(patch.endAt) : null;
-
-      const item = await Offer.findByIdAndUpdate(id, patch, { new: true, runValidators: true });
-      if (!item) return safeNotFound(res, "NOT_FOUND", "Offer not found");
-
-      return sendOk(res, item);
-    } catch (e) {
-      return jsonErr(res, e);
-    }
-  }
+  validate(offerUpdateSchema),
+  requireObjectIdParam("id", "INVALID_ID", "Invalid Offer id"),
+  updateOfferHandler
 );
 
-router.delete("/offers/:id", requirePermission(PERMISSIONS.PROMOS_WRITE), async (req, res) => {
-  try {
-    const id = String(req.params.id || "");
-    if (!isValidObjectId(id)) throw makeErr(400, "INVALID_ID", "Invalid Offer id");
+router.patch(
+  "/offers/:id",
+  requirePermission(PERMISSIONS.PROMOS_WRITE),
+  validate(offerUpdateSchema),
+  requireObjectIdParam("id", "INVALID_ID", "Invalid Offer id"),
+  updateOfferHandler
+);
 
+router.delete(
+  "/offers/:id",
+  requirePermission(PERMISSIONS.PROMOS_WRITE),
+  validate(offerDeleteSchema),
+  requireObjectIdParam("id", "INVALID_ID", "Invalid Offer id"),
+  asyncHandler(async (req, res) => {
+    const id = String(req.params.id);
     const item = await Offer.findByIdAndDelete(id);
     if (!item) return safeNotFound(res, "NOT_FOUND", "Offer not found");
-
     return sendOk(res, { deleted: true });
-  } catch (e) {
-    return jsonErr(res, e);
-  }
-});
+  })
+);
 
 /* ============================
-   Orders (Admin View) - Legacy endpoints
-   REMOVED: Use /api/v1/admin/orders routes (admin.orders.routes.js)
+   Stock Reservation Repair (SETTINGS_WRITE)
 ============================ */
 
-
-/* ============================
-   IMPORTANT: Returns moved out
-============================ */
-/**
- * ✅ Returns are handled in:
- *   src/routes/admin.returns.routes.js
- * mounted at: /api/v1/admin/returns
- *
- * Do NOT re-add returns endpoints here to avoid duplication/conflicts.
- */
-
-/* ============================
-   Stock Reservation Repair (requires SETTINGS_WRITE)
-============================ */
-
-/**
- * GET /api/v1/admin/reservations/repair/status
- * Get the status of the background repair job
- */
-router.get("/reservations/repair/status", requirePermission(PERMISSIONS.SETTINGS_WRITE), async (req, res) => {
-  try {
+router.get(
+  "/reservations/repair/status",
+  requirePermission(PERMISSIONS.SETTINGS_WRITE),
+  asyncHandler(async (_req, res) => {
     const status = getRepairJobStatus();
-    return res.json({ ok: true, data: status });
-  } catch (e) {
-    return jsonErr(res, e);
-  }
-});
+    return sendOk(res, status);
+  })
+);
 
-/**
- * POST /api/v1/admin/reservations/repair/trigger
- * Manually trigger a repair job run
- * Returns the repair run statistics
- */
-router.post("/reservations/repair/trigger", requirePermission(PERMISSIONS.SETTINGS_WRITE), async (req, res) => {
-  try {
+router.post(
+  "/reservations/repair/trigger",
+  requirePermission(PERMISSIONS.SETTINGS_WRITE),
+  asyncHandler(async (_req, res) => {
     const result = await triggerRepairJob();
-    return res.json({ ok: true, data: result });
-  } catch (e) {
-    return jsonErr(res, e);
-  }
-});
+    return sendOk(res, result);
+  })
+);
 
 export default router;

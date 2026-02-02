@@ -1,9 +1,38 @@
 import "dotenv/config";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+
+// Optional Sentry (early init, no PII; requestId added in error handler)
+if (process.env.SENTRY_DSN) {
+  try {
+    const Sentry = require("@sentry/node");
+    Sentry.init({
+      dsn: process.env.SENTRY_DSN,
+      environment: process.env.NODE_ENV || "development",
+      beforeSend(event) {
+        // Strip PII from event; requestId is set in error handler extra
+        if (event.request?.headers) {
+          delete event.request.headers.authorization;
+          delete event.request.headers.cookie;
+        }
+        return event;
+      },
+    });
+  } catch (e) {
+    // Sentry optional
+  }
+}
+
+// Optional OpenTelemetry (must run before app so instrumentations patch http/express)
+import "./tracing.js";
+
 import http from "node:http";
 import mongoose from "mongoose";
 
 import { app } from "./app.js";
 import { connectDB } from "./config/db.js";
+import { log } from "./utils/logger.js";
 import { initRateLimiters } from "./middleware/rateLimit.js";
 import { initRedisCache } from "./utils/cache.js";
 import {
@@ -14,6 +43,10 @@ import {
   startProductRankingJob,
   stopProductRankingJob,
 } from "./jobs/productRanking.job.js";
+import {
+  startInvoiceRetryJob,
+  stopInvoiceRetryJob,
+} from "./jobs/invoiceRetry.job.js";
 
 /* ============================
    Env + Config
@@ -37,6 +70,11 @@ const ENABLE_RANKING_JOB =
 const PRODUCT_RANKING_INTERVAL_MS =
   Number(process.env.PRODUCT_RANKING_INTERVAL_MS) || 600000;
 
+const ENABLE_INVOICE_RETRY_JOB =
+  String(process.env.ENABLE_INVOICE_RETRY_JOB || "true").trim().toLowerCase() !== "false";
+const INVOICE_RETRY_INTERVAL_MS =
+  Number(process.env.INVOICE_RETRY_INTERVAL_MS) || 5 * 60 * 1000; // 5 minutes
+
 const SHUTDOWN_TIMEOUT_MS =
   Number(process.env.SHUTDOWN_TIMEOUT_MS) || 10_000;
 
@@ -52,10 +90,8 @@ const HEADERS_TIMEOUT_MS =
 const KEEP_ALIVE_TIMEOUT_MS =
   Number(process.env.HTTP_KEEP_ALIVE_TIMEOUT_MS) || 65_000;
 
-const SERVER_LOG_PREFIX = "[server]";
-
 if (!Number.isFinite(PORT) || PORT <= 0) {
-  console.error(`${SERVER_LOG_PREFIX} Invalid PORT value: ${process.env.PORT}`);
+  log.error({ phase: "server", port: process.env.PORT }, "Invalid PORT value");
   process.exit(1);
 }
 
@@ -106,46 +142,39 @@ async function bootstrap() {
 
   // 2) Rate limiters (Redis optional)
   await initRateLimiters().catch((err) => {
-    console.warn(
-      `${SERVER_LOG_PREFIX} Rate limit Redis init failed (using memory store):`,
-      String(err?.message || err)
-    );
+    log.warn({ phase: "server", err: String(err?.message || err) }, "Rate limit Redis init failed (using memory store)");
   });
 
   // 2.5) Cache (Redis optional)
   await initRedisCache().catch((err) => {
-    console.warn(
-      `${SERVER_LOG_PREFIX} Cache Redis init failed (using memory cache):`,
-      String(err?.message || err)
-    );
+    log.warn({ phase: "server", err: String(err?.message || err) }, "Cache Redis init failed (using memory cache)");
   });
 
   // 3) Start jobs (only after DB is ready)
   if (ENABLE_REPAIR_JOB) {
     try {
       startReservationRepairJob({ intervalMs: REPAIR_INTERVAL_MS });
-      console.log(
-        `${SERVER_LOG_PREFIX} Reservation repair job started (interval=${REPAIR_INTERVAL_MS}ms)`
-      );
+      log.info({ phase: "server", intervalMs: REPAIR_INTERVAL_MS }, "Reservation repair job started");
     } catch (err) {
-      console.error(
-        `${SERVER_LOG_PREFIX} Failed to start reservation repair job:`,
-        String(err?.message || err)
-      );
+      log.error({ phase: "server", err: String(err?.message || err) }, "Failed to start reservation repair job");
     }
   }
 
   if (ENABLE_RANKING_JOB) {
     try {
       startProductRankingJob({ intervalMs: PRODUCT_RANKING_INTERVAL_MS });
-      console.log(
-        `${SERVER_LOG_PREFIX} Product ranking job started (interval=${PRODUCT_RANKING_INTERVAL_MS}ms)`
-      );
+      log.info({ phase: "server", intervalMs: PRODUCT_RANKING_INTERVAL_MS }, "Product ranking job started");
     } catch (err) {
-      console.error(
-        `${SERVER_LOG_PREFIX} Failed to start product ranking job:`,
-        String(err?.message || err)
-      );
+      log.error({ phase: "server", err: String(err?.message || err) }, "Failed to start product ranking job");
+    }
+  }
+
+  if (ENABLE_INVOICE_RETRY_JOB) {
+    try {
+      startInvoiceRetryJob({ intervalMs: INVOICE_RETRY_INTERVAL_MS });
+      log.info({ phase: "server", intervalMs: INVOICE_RETRY_INTERVAL_MS }, "Invoice retry job started");
+    } catch (err) {
+      log.error({ phase: "server", err: String(err?.message || err) }, "Failed to start invoice retry job");
     }
   }
 
@@ -166,7 +195,7 @@ async function bootstrap() {
 
   server.listen(PORT, HOST, () => {
     isReady = true;
-    console.log(`${SERVER_LOG_PREFIX} running on http://${HOST}:${PORT}`);
+    log.info({ phase: "server", host: HOST, port: PORT }, "Server running");
   });
 
   /* ============================
@@ -174,20 +203,16 @@ async function bootstrap() {
   ============================ */
   server.on("error", (err) => {
     if (err?.code === "EADDRINUSE") {
-      console.error(
-        `${SERVER_LOG_PREFIX} Port ${PORT} is already in use. Stop the other process or change PORT in .env`
-      );
+      log.error({ phase: "server", port: PORT }, "Port already in use");
       process.exit(1);
     }
 
     if (err?.code === "EACCES") {
-      console.error(
-        `${SERVER_LOG_PREFIX} No permission to bind to port ${PORT}. Try a higher port (e.g., 4001).`
-      );
+      log.error({ phase: "server", port: PORT }, "No permission to bind to port");
       process.exit(1);
     }
 
-    console.error(`${SERVER_LOG_PREFIX} Server failed to start:`, err);
+    log.error({ phase: "server", err: String(err?.message || err) }, "Server failed to start");
     process.exit(1);
   });
 
@@ -200,35 +225,41 @@ async function bootstrap() {
     if (isShuttingDown) return;
     isShuttingDown = true;
 
-    console.log(`${SERVER_LOG_PREFIX} ${signal} received, shutting down gracefully...`);
+    log.info({ phase: "server", signal }, "Shutting down gracefully");
 
     // stop jobs first (no new work)
     try {
       stopReservationRepairJob();
     } catch (e) {
-      console.warn(`${SERVER_LOG_PREFIX} stopReservationRepairJob failed:`, String(e?.message || e));
+      log.warn({ phase: "server", err: String(e?.message || e) }, "stopReservationRepairJob failed");
     }
 
     try {
       stopProductRankingJob();
     } catch (e) {
-      console.warn(`${SERVER_LOG_PREFIX} stopProductRankingJob failed:`, String(e?.message || e));
+      log.warn({ phase: "server", err: String(e?.message || e) }, "stopProductRankingJob failed");
+    }
+
+    try {
+      stopInvoiceRetryJob();
+    } catch (e) {
+      log.warn({ phase: "server", err: String(e?.message || e) }, "stopInvoiceRetryJob failed");
     }
 
     // stop accepting new connections
     server.close(async (closeErr) => {
       if (closeErr) {
-        console.error(`${SERVER_LOG_PREFIX} Error closing HTTP server:`, closeErr);
+        log.error({ phase: "server", err: String(closeErr?.message || closeErr) }, "Error closing HTTP server");
       } else {
-        console.log(`${SERVER_LOG_PREFIX} HTTP server closed`);
+        log.info({ phase: "server" }, "HTTP server closed");
       }
 
       try {
         await mongoose.disconnect();
-        console.log(`${SERVER_LOG_PREFIX} MongoDB disconnected`);
+        log.info({ phase: "server" }, "MongoDB disconnected");
         process.exit(closeErr ? 1 : 0);
       } catch (err) {
-        console.error(`${SERVER_LOG_PREFIX} Error during MongoDB disconnect:`, err);
+        log.error({ phase: "server", err: String(err?.message || err) }, "Error during MongoDB disconnect");
         process.exit(1);
       }
     });
@@ -246,7 +277,7 @@ async function bootstrap() {
 
     // hard-exit fallback (prevents hanging)
     setTimeout(() => {
-      console.error(`${SERVER_LOG_PREFIX} Force exit (shutdown timeout)`);
+      log.error({ phase: "server" }, "Force exit (shutdown timeout)");
       process.exit(1);
     }, SHUTDOWN_TIMEOUT_MS).unref();
   }
@@ -258,18 +289,18 @@ async function bootstrap() {
      Process-level safety
   ============================ */
   process.on("unhandledRejection", (reason) => {
-    console.error(`${SERVER_LOG_PREFIX} Unhandled Rejection:`, reason);
+    log.error({ phase: "server", reason: String(reason) }, "Unhandled Rejection");
     gracefulShutdown("unhandledRejection");
   });
 
   process.on("uncaughtException", (err) => {
-    console.error(`${SERVER_LOG_PREFIX} Uncaught Exception:`, err);
+    log.error({ phase: "server", err: String(err?.message || err) }, "Uncaught Exception");
     gracefulShutdown("uncaughtException");
   });
 }
 
 
 bootstrap().catch((err) => {
-  console.error(`${SERVER_LOG_PREFIX} Bootstrap failed:`, err);
+  log.error({ phase: "server", err: String(err?.message || err) }, "Bootstrap failed");
   process.exit(1);
 });

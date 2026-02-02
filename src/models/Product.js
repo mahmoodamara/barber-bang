@@ -101,7 +101,10 @@ const productSchema = new Schema(
     // Legacy fields (optional) - kept for backward compatibility
     title: { type: String, default: "", trim: true, maxlength: 160 },
     description: { type: String, default: "", trim: true, maxlength: 4000 },
-    slug: { type: String, default: "", trim: true, lowercase: true, maxlength: 160 },
+    // URL-safe slug for SEO routing.
+    // Default undefined (NOT "") so indexing semantics align with Category model.
+    // Auto-generated in pre-validate hook when missing.
+    slug: { type: String, default: undefined, trim: true, lowercase: true, maxlength: 160 },
 
     // Money in major units (ILS)
     price: { type: Number, required: true, min: 0 },
@@ -366,9 +369,10 @@ productSchema.pre("validate", function productPreValidate(next) {
         }
       }
 
-      // Sync legacy imageUrl with primary image if not already set
+      // Always sync legacy imageUrl with primary image when images are present
+      // This ensures imageUrl stays consistent even if images are updated outside admin routes
       const primaryImage = this.images.find((img) => img.isPrimary);
-      if (primaryImage && !this.imageUrl) {
+      if (primaryImage) {
         this.imageUrl = primaryImage.secureUrl || primaryImage.url || "";
       }
     }
@@ -491,5 +495,9 @@ productSchema.index({ "stats.ratingAvg": -1, "stats.ratingCount": -1, createdAt:
 
 // ✅ Helps onSale queries (still needs $expr in queries)
 productSchema.index({ salePrice: 1, price: 1, saleStartAt: 1, saleEndAt: 1 });
+
+// Admin listing patterns (soft-delete aware)
+productSchema.index({ isDeleted: 1, updatedAt: -1 });
+productSchema.index({ categoryId: 1, isDeleted: 1, createdAt: -1 });
 
 export const Product = mongoose.model("Product", productSchema);

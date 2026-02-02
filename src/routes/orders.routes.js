@@ -145,12 +145,19 @@ function canCancelStatus(status) {
 
 /* ----------------------------- Schemas ----------------------------- */
 
-const trackSchema = z.object({
-  body: z.object({
-    orderId: z.string().min(1),
-    phone: z.string().min(7).max(30),
-  }),
-});
+const trackSchema = z
+  .object({
+    body: z.object({
+      orderId: z.string().optional(),
+      id: z.string().optional(),
+      orderNumber: z.string().optional(),
+      phone: z.string().min(7).max(30),
+    }),
+  })
+  .refine((v) => v.body.orderId || v.body.id || (v.body.orderNumber && v.body.orderNumber.trim()), {
+    message: "orderId, id, or orderNumber is required",
+    path: ["body"],
+  });
 
 const cancelSchema = z.object({
   body: z.object({
@@ -197,12 +204,29 @@ router.get("/me", requireAuth(), async (req, res) => {
  */
 router.post("/track", validate(trackSchema), async (req, res) => {
   try {
-    const { orderId, phone } = req.validated.body;
+    const body = req.validated?.body ?? req.body;
+    const orderId = body.orderId ?? body.id;
+    const orderNumber = body.orderNumber?.trim();
+    const phone = body.phone;
 
-    if (!isValidObjectId(orderId)) return safe404(res);
+    if (!orderNumber && orderId && !isValidObjectId(orderId)) {
+      return res.status(400).json({
+        ok: false,
+        error: {
+          code: "BAD_REQUEST",
+          message: "Invalid order id",
+          requestId: getRequestId(req),
+          path: req?.originalUrl || req?.url || "",
+        },
+      });
+    }
 
-    // lean() for speed (virtuals won't exist)
-    const order = await Order.findById(orderId).lean();
+    let order = null;
+    if (orderNumber) {
+      order = await Order.findOne({ orderNumber }).lean();
+    } else if (orderId) {
+      order = await Order.findById(orderId).lean();
+    }
     if (!order) return safe404(res);
 
     // Prefer shipping.phone (new schema), fallback to address.phone (old)

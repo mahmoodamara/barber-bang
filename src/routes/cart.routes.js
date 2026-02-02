@@ -139,8 +139,8 @@ async function getPopulatedCart(userId, { lang = "he" } = {}) {
   for (const ci of user.cart || []) {
     const p = ci.productId;
 
-    // Product missing or inactive => drop line
-    if (!p || !p._id || p.isActive === false) {
+    // Product missing, inactive, or deleted => drop line
+    if (!p || !p._id || p.isActive === false || p.isDeleted === true) {
       continue;
     }
 
@@ -213,15 +213,17 @@ const addSchema = z.object({
     productId: z.string().min(1),
     qty: z.number().int().min(1).max(999),
     variantId: z.string().min(1).optional(),
+    // If true, sets qty instead of adding (prevents double-add on auth redirect)
+    idempotent: z.boolean().optional(),
   }),
 });
 
 router.post("/add", requireAuth(), validate(addSchema), async (req, res) => {
   try {
-    const { productId, qty, variantId } = req.validated.body;
+    const { productId, qty, variantId, idempotent } = req.validated.body;
 
     const product = await Product.findById(productId);
-    if (!product || product.isActive === false) {
+    if (!product || product.isActive === false || product.isDeleted === true) {
       return res.status(404).json(errorPayload(req, "NOT_FOUND", "Product not found"));
     }
 
@@ -258,7 +260,11 @@ router.post("/add", requireAuth(), validate(addSchema), async (req, res) => {
     );
 
     if (idx >= 0) {
-      user.cart[idx].qty = Math.min((user.cart[idx].qty || 0) + qty, 999);
+      // If idempotent=true, set qty directly (prevents double-add on auth redirect)
+      // Otherwise, add to existing qty (default behavior)
+      user.cart[idx].qty = idempotent
+        ? Math.min(qty, 999)
+        : Math.min((user.cart[idx].qty || 0) + qty, 999);
     } else {
       const now = new Date();
       const unitMinor = computeEffectiveUnitPriceMinor(product, variant, now);
@@ -315,7 +321,7 @@ router.post("/set-qty", requireAuth(), validate(setQtySchema), async (req, res) 
     const { productId, qty, variantId } = req.validated.body;
 
     const product = await Product.findById(productId);
-    if (!product || product.isActive === false) {
+    if (!product || product.isActive === false || product.isDeleted === true) {
       return res.status(404).json(errorPayload(req, "NOT_FOUND", "Product not found"));
     }
 

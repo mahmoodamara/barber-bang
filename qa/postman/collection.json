@@ -1,0 +1,129 @@
+{
+  "info": {
+    "name": "Men Grooming Store API QA",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:4000" },
+    { "key": "token", "value": "" },
+    { "key": "adminToken", "value": "" },
+    { "key": "orderId", "value": "" },
+    { "key": "approvalId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Register",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/auth/register", "host": ["{{baseUrl}}"], "path": ["api", "auth", "register"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"QA User\",\n  \"email\": \"qa_{{$timestamp}}@example.com\",\n  \"password\": \"Abcdef12\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Login (set token)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('token', json?.data?.token || '');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/auth/login", "host": ["{{baseUrl}}"], "path": ["api", "auth", "login"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"qa_{{$timestamp}}@example.com\",\n  \"password\": \"Abcdef12\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Get Cart (auth)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+            "url": { "raw": "{{baseUrl}}/api/cart", "host": ["{{baseUrl}}"], "path": ["api", "cart"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Checkout",
+      "item": [
+        {
+          "name": "Quote",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": { "raw": "{{baseUrl}}/api/checkout/quote", "host": ["{{baseUrl}}"], "path": ["api", "checkout", "quote"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"shippingMode\": \"DELIVERY\",\n  \"deliveryAreaId\": \"<PUT_VALID_ID>\",\n  \"address\": {\n    \"fullName\": \"QA\",\n    \"phone\": \"0500000000\",\n    \"city\": \"TA\",\n    \"street\": \"X\"\n  }\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Admin Approvals (Refund)",
+      "item": [
+        {
+          "name": "Create Refund Approval",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('approvalId', json?.data?._id || json?.data?.id || '');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Idempotency-Key", "value": "qa_refund_{{orderId}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": { "raw": "{{baseUrl}}/api/admin/approvals", "host": ["{{baseUrl}}"], "path": ["api", "admin", "approvals"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"actionType\": \"REFUND\",\n  \"payload\": {\n    \"orderId\": \"{{orderId}}\",\n    \"amount\": 10,\n    \"reason\": \"qa\",\n    \"note\": \"qa refund\"\n  }\n}"
+            }
+          }
+        },
+        {
+          "name": "Approve Refund",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{adminToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": { "raw": "{{baseUrl}}/api/admin/approvals/{{approvalId}}", "host": ["{{baseUrl}}"], "path": ["api", "admin", "approvals", "{{approvalId}}"] },
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"approved\"\n}" }
+          }
+        }
+      ]
+    }
+  ]
+}

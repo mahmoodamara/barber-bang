@@ -5,7 +5,7 @@ import mongoose from "mongoose";
 
 import { User } from "../models/User.js";
 import { Order } from "../models/Order.js";
-import { requireAuth, requireRole } from "../middleware/auth.js";
+import { requireAuth, requireRole, PERMISSIONS } from "../middleware/auth.js";
 import { auditAdmin } from "../middleware/audit.js";
 import { validate } from "../middleware/validate.js";
 import { getRequestId } from "../middleware/error.js";
@@ -58,6 +58,7 @@ function mapUser(u) {
     name: obj.name || "",
     email: obj.email || "",
     role: obj.role || "user",
+    permissions: Array.isArray(obj.permissions) ? obj.permissions : [],
     isBlocked: Boolean(obj.isBlocked),
     blockedAt: obj.blockedAt || null,
     blockedReason: obj.blockedReason || "",
@@ -116,6 +117,20 @@ const userOrdersSchema = z.object({
       limit: z.string().regex(/^\d+$/).optional(),
     })
     .optional(),
+});
+
+// Strict allowlist of valid permissions
+const VALID_PERMISSIONS = Object.values(PERMISSIONS);
+
+const permissionsUpdateSchema = z.object({
+  params: z.object({ id: z.string().min(1) }),
+  body: z
+    .object({
+      permissions: z
+        .array(z.enum(VALID_PERMISSIONS))
+        .max(VALID_PERMISSIONS.length),
+    })
+    .strict(),
 });
 
 /* ============================
@@ -362,6 +377,58 @@ router.get("/:id/orders", validate(userOrdersSchema), async (req, res) => {
       limit,
       total,
       pages: Math.ceil(total / limit),
+    });
+  } catch (e) {
+    return jsonErr(res, e);
+  }
+});
+
+/* ============================
+   PATCH /api/admin/users/:id/permissions
+   Update staff user permissions
+============================ */
+
+router.patch("/:id/permissions", validate(permissionsUpdateSchema), async (req, res) => {
+  try {
+    const id = String(req.params.id || "");
+    if (!isValidObjectId(id)) {
+      return safeNotFound(res, "NOT_FOUND", "User not found");
+    }
+
+    const { permissions } = req.validated.body;
+
+    // Prevent admin from modifying their own permissions
+    if (String(req.user._id) === id) {
+      throw makeErr(400, "CANNOT_MODIFY_SELF", "You cannot modify your own permissions");
+    }
+
+    const user = await User.findById(id).select("-passwordHash -cart -wishlist");
+    if (!user) {
+      return safeNotFound(res, "NOT_FOUND", "User not found");
+    }
+
+    // Only staff users can have permissions modified
+    // Admins have all permissions implicitly, regular users cannot have admin permissions
+    if (user.role !== "staff") {
+      throw makeErr(400, "INVALID_ROLE", "Permissions can only be assigned to staff users");
+    }
+
+    // Deduplicate and validate permissions against strict allowlist
+    const validPermissions = [...new Set(permissions)].filter((p) =>
+      VALID_PERMISSIONS.includes(p)
+    );
+
+    user.permissions = validPermissions;
+
+    // Invalidate tokens when permissions change (security measure)
+    user.tokenVersion = (user.tokenVersion || 0) + 1;
+
+    await user.save();
+
+    return jsonRes(res, {
+      ...mapUser(user),
+      permissions: user.permissions,
+      message: "Permissions updated. User will need to re-authenticate.",
     });
   } catch (e) {
     return jsonErr(res, e);
