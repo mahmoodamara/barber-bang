@@ -131,6 +131,9 @@ function ensureStartBeforeEnd({ startAt, endAt }) {
 
 const objectIdParamSchema = z.object({ id: z.string().min(1) }).strict();
 
+// Reusable ObjectId string for refs (giftProductId, requiredProductId, etc.)
+const objectIdString = z.string().min(1).refine((v) => isValidObjectId(v), { message: "Invalid ObjectId" });
+
 // NOTE: coerce to accept "12" coming from forms safely; still strict allowlisting
 const money = z.coerce.number().min(0);
 const intMin1 = z.coerce.number().int().min(1);
@@ -678,13 +681,15 @@ router.delete(
 const giftCreateSchema = z.object({
   body: z
     .object({
-      nameHe: z.string().min(2).max(160).optional(),
+      nameHe: z.string().min(2).max(160),
       nameAr: z.string().max(160).optional(),
       name: z.string().min(2).max(160).optional(),
-      giftProductId: z.string().min(1),
+      giftProductId: objectIdString,
+      giftVariantId: objectIdString.nullable().optional(),
+      qty: z.coerce.number().int().min(1).max(50).optional(),
       minOrderTotal: money.nullable().optional(),
-      requiredProductId: z.string().min(1).nullable().optional(),
-      requiredCategoryId: z.string().min(1).nullable().optional(),
+      requiredProductId: objectIdString.nullable().optional(),
+      requiredCategoryId: objectIdString.nullable().optional(),
       startAt: z.string().datetime().nullable().optional(),
       endAt: z.string().datetime().nullable().optional(),
       isActive: z.boolean().optional(),
@@ -699,10 +704,12 @@ const giftUpdateSchema = z.object({
       nameHe: z.string().min(2).max(160).optional(),
       nameAr: z.string().max(160).optional(),
       name: z.string().min(2).max(160).optional(),
-      giftProductId: z.string().min(1).optional(),
+      giftProductId: objectIdString.optional(),
+      giftVariantId: objectIdString.nullable().optional(),
+      qty: z.coerce.number().int().min(1).max(50).optional(),
       minOrderTotal: money.nullable().optional(),
-      requiredProductId: z.string().min(1).nullable().optional(),
-      requiredCategoryId: z.string().min(1).nullable().optional(),
+      requiredProductId: objectIdString.nullable().optional(),
+      requiredCategoryId: objectIdString.nullable().optional(),
       startAt: z.string().datetime().nullable().optional(),
       endAt: z.string().datetime().nullable().optional(),
       isActive: z.boolean().optional(),
@@ -723,6 +730,18 @@ router.get(
   })
 );
 
+router.get(
+  "/gifts/:id",
+  requirePermission(PERMISSIONS.PROMOS_WRITE),
+  requireObjectIdParam("id", "INVALID_ID", "Invalid Gift id"),
+  asyncHandler(async (req, res) => {
+    const id = String(req.params.id);
+    const item = await Gift.findById(id).lean();
+    if (!item) return safeNotFound(res, "NOT_FOUND", "Gift not found");
+    return sendOk(res, item);
+  })
+);
+
 router.post(
   "/gifts",
   requirePermission(PERMISSIONS.PROMOS_WRITE),
@@ -735,10 +754,12 @@ router.post(
     ensureStartBeforeEnd({ startAt, endAt });
 
     const item = await Gift.create({
-      nameHe: b.nameHe || b.name || "",
+      nameHe: b.nameHe,
       nameAr: b.nameAr || "",
       name: b.name || b.nameHe || "",
       giftProductId: b.giftProductId,
+      giftVariantId: b.giftVariantId ?? null,
+      qty: b.qty ?? 1,
       minOrderTotal: b.minOrderTotal ?? null,
       requiredProductId: b.requiredProductId ?? null,
       requiredCategoryId: b.requiredCategoryId ?? null,

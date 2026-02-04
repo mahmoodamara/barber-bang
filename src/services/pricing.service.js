@@ -824,6 +824,43 @@ async function resolveCouponDiscountMinor({ code, baseMinor }) {
 }
 
 /**
+ * ✅ Check if a coupon can be reserved (for early warning in quote without actually reserving)
+ * Returns { available: true } or { available: false, reason: "limit_reached" | "user_limit_reached" }
+ */
+async function checkCouponAvailability(code, userId = null) {
+  const raw = String(code || "").trim();
+  if (!raw) return { available: true };
+
+  const normalized = raw.toUpperCase();
+  const coupon = await Coupon.findOne({ code: normalized })
+    .select("usageLimit usedCount reservedCount usagePerUser startAt endAt isActive")
+    .lean();
+  if (!coupon) return { available: true };
+  if (!isActiveByDates(coupon, new Date())) return { available: true };
+
+  const used = Number(coupon.usedCount || 0);
+  const reserved = Number(coupon.reservedCount || 0);
+  if (coupon.usageLimit != null && used + reserved >= Number(coupon.usageLimit)) {
+    return { available: false, reason: "limit_reached" };
+  }
+
+  if (userId && coupon.usagePerUser != null) {
+    const userObjId = mongoose.Types.ObjectId.isValid(userId) ? new mongoose.Types.ObjectId(userId) : null;
+    if (userObjId) {
+      const usage = await CouponUserUsage.findOne(
+        { couponId: coupon._id, userId: userObjId },
+        { usedCount: 1 }
+      ).lean();
+      if (usage && Number(usage.usedCount || 0) >= Number(coupon.usagePerUser)) {
+        return { available: false, reason: "user_limit_reached" };
+      }
+    }
+  }
+
+  return { available: true };
+}
+
+/**
  * ✅ Resolve gifts with stock validation
  * Returns gifts with stock info + validation warnings
  */
@@ -844,10 +881,12 @@ async function resolveGifts({ totalBeforeShippingMajor, lineItems }) {
     const byCategory = g.requiredCategoryId ? cartCategoryIds.has(g.requiredCategoryId.toString()) : true;
 
     if (byTotal && byProduct && byCategory && g.giftProductId) {
+      const ruleQty = clampInt(g.qty ?? 1, 1, 50);
+      const variantIdStr = g.giftVariantId ? g.giftVariantId.toString() : null;
       matchedGiftRequests.push({
         productId: g.giftProductId.toString(),
-        variantId: null, // rule-based gifts don't support variants yet
-        requestedQty: 1,
+        variantId: variantIdStr,
+        requestedQty: ruleQty,
         giftRuleId: g._id.toString(),
         giftRuleName: g.nameHe || g.name || "",
       });
@@ -881,14 +920,33 @@ async function resolveGifts({ totalBeforeShippingMajor, lineItems }) {
       continue;
     }
 
-    // Check stock (for non-variant products)
-    const availableStock = clampInt(product.stock ?? 0, 0, 999999);
+    // Resolve available stock: variant product use variant.stock, else product.stock
+    let availableStock = 0;
+    if (req.variantId) {
+      const variant = (product.variants || []).find(
+        (v) => v._id && String(v._id) === String(req.variantId)
+      );
+      if (!variant) {
+        giftWarnings.push({
+          type: "GIFT_VARIANT_NOT_FOUND",
+          productId: req.productId,
+          variantId: req.variantId,
+          message: `Gift variant not found`,
+        });
+        continue;
+      }
+      availableStock = clampInt(variant.stock ?? 0, 0, 999999);
+    } else {
+      availableStock = clampInt(product.stock ?? 0, 0, 999999);
+    }
+
     const grantedQty = Math.min(req.requestedQty, availableStock);
 
     if (grantedQty <= 0) {
       giftWarnings.push({
         type: "GIFT_OUT_OF_STOCK",
         productId: req.productId,
+        variantId: req.variantId || undefined,
         titleHe: product.titleHe || product.title || "",
         requestedQty: req.requestedQty,
         availableStock: 0,
@@ -901,6 +959,7 @@ async function resolveGifts({ totalBeforeShippingMajor, lineItems }) {
       giftWarnings.push({
         type: "GIFT_PARTIAL_STOCK",
         productId: req.productId,
+        variantId: req.variantId || undefined,
         titleHe: product.titleHe || product.title || "",
         requestedQty: req.requestedQty,
         grantedQty,
@@ -969,7 +1028,7 @@ function mergeGifts(gifts) {
  *
  * Additive: items[] returned for order creation + UI
  */
-export async function quotePricing({ cartItems, shipping, couponCode }) {
+export async function quotePricing({ cartItems, shipping, couponCode, userId = null }) {
   const now = new Date();
   const vatEnabled = String(process.env.ENABLE_VAT ?? "true").trim().toLowerCase() !== "false";
   const vatRateRaw = Number(process.env.VAT_RATE ?? 0.18);
@@ -1103,6 +1162,11 @@ export async function quotePricing({ cartItems, shipping, couponCode }) {
   const shippingFeeBaseMinor = await resolveShippingFeeMinor(shipping);
   let shippingFeeMinor = shippingFeeBaseMinor;
 
+  /**
+   * ✅ FIXED DISCOUNT ORDER (do not change without product/API doc update)
+   * 1. Campaign (single) → 2. Coupon (single) → 3. Offers (stackable) → 4. Gifts (rules + offer gifts)
+   * Each step applies to the amount left after the previous. Frontend/API docs assume this order.
+   */
   // 3) Campaign
   const campaign = await resolveCampaignDiscountMinor({ lineItems: items, subtotalMinor });
   const campaignMinor = Math.max(0, campaign.amountMinor || 0);
@@ -1256,6 +1320,11 @@ export async function quotePricing({ cartItems, shipping, couponCode }) {
 
       // Gift warnings (out of stock, partial stock, etc.)
       giftWarnings: giftWarnings.length > 0 ? giftWarnings : [],
+
+      // ✅ Coupon availability (early warning: can this coupon be reserved at checkout?)
+      ...(couponCode && String(couponCode).trim()
+        ? { couponAvailability: await checkCouponAvailability(couponCode, userId) }
+        : {}),
     },
   };
 }

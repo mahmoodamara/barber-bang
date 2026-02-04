@@ -292,7 +292,15 @@ async function clearPurchasedItemsFromCart(userId, orderItems) {
 
 const webhookEventsTotal = getWebhookEventCounter();
 
-router.post("/", express.raw({ type: "application/json" }), async (req, res) => {
+router.post(
+  "/",
+  express.raw({
+    type: ["application/json", "application/json; charset=utf-8"],
+    verify: (req, _res, buf) => {
+      req.rawBodyString = buf.toString("utf-8");
+    },
+  }),
+  async (req, res) => {
   let type = "unknown";
   let lockId = "";
   let lockedOrderId = null;
@@ -307,7 +315,25 @@ router.post("/", express.raw({ type: "application/json" }), async (req, res) => 
         .json(errorPayload(req, "INVALID_STRIPE_SIGNATURE", "Missing stripe-signature header"));
     }
 
-    const event = constructWebhookEvent(req.body, sig);
+    // Use raw body captured in verify callback, or fallback to req.body (Buffer/object/string)
+    let rawBody = req.rawBodyString;
+    if (rawBody === undefined) {
+      rawBody = req.body;
+      if (Buffer.isBuffer(rawBody)) {
+        rawBody = rawBody.toString("utf-8");
+      } else if (rawBody && typeof rawBody === "object") {
+        rawBody = JSON.stringify(rawBody);
+      } else if (typeof rawBody !== "string") {
+        rawBody = String(rawBody || "");
+      }
+    }
+    if (!rawBody) {
+      return res
+        .status(400)
+        .json(errorPayload(req, "INVALID_BODY", "Missing webhook body"));
+    }
+
+    const event = constructWebhookEvent(rawBody, sig);
 
     type = String(event?.type || "");
     const accepted = new Set([
@@ -334,8 +360,6 @@ router.post("/", express.raw({ type: "application/json" }), async (req, res) => 
       {
         $setOnInsert: {
           eventId,
-          type,
-          sessionId,
           status: "received",
         },
         $set: { type, sessionId },

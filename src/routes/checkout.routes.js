@@ -445,6 +445,7 @@ router.post("/quote", requireAuth(), validate(quoteSchema), async (req, res) => 
       cartItems,
       shipping: toShippingInput(b),
       couponCode: b.couponCode,
+      userId: req.user?._id ?? null,
     });
 
     return res.json({ ok: true, data: quote });
@@ -487,6 +488,7 @@ router.post("/cod", requireAuth(), validate(quoteSchema), async (req, res) => {
       cartItems,
       shipping,
       couponCode: b.couponCode,
+      userId: req.user?._id ?? null,
     });
 
     // ✅ Check for gift stock warnings - if any gifts are out of stock, reject early
@@ -722,6 +724,7 @@ router.post("/stripe", requireAuth(), validate(quoteSchema), async (req, res) =>
       cartItems,
       shipping: shippingWithSnapshots,
       couponCode: b.couponCode,
+      userId: req.user?._id ?? null,
     });
 
     // ✅ Check for gift stock warnings - if any gifts are out of stock, reject early

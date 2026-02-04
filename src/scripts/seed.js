@@ -1,4 +1,4 @@
-﻿// scripts/seed.js
+// scripts/seed.js
 // ✅ FULL Production-grade Seeder for this server (ESM)
 // - Refuses to run in production unless ALLOW_SEED_PROD=true
 // - Deletes ALL existing data first (in safe order)
@@ -23,6 +23,7 @@ import { StorePickupConfig } from "../models/StorePickupConfig.js";
 import { Coupon } from "../models/Coupon.js";
 import { CouponReservation } from "../models/CouponReservation.js";
 import { CouponRedemption } from "../models/CouponRedemption.js";
+import { CouponUserUsage } from "../models/CouponUserUsage.js";
 import { Campaign } from "../models/Campaign.js";
 import { Offer } from "../models/Offer.js";
 import { Gift } from "../models/Gift.js";
@@ -43,59 +44,16 @@ import { ProductEngagement } from "../models/ProductEngagement.js";
 import { ProductSignalDaily } from "../models/ProductSignalDaily.js";
 import { Counter } from "../models/Counter.js";
 
-/* =========================
-   Helpers
-========================= */
-
-function toMinorSafe(major) {
-  const n = Number(major ?? 0);
-  if (!Number.isFinite(n)) return 0;
-  return Math.max(0, Math.round((n + Number.EPSILON) * 100));
-}
-
-function nowPlusDays(days) {
-  const d = new Date();
-  d.setDate(d.getDate() + Number(days || 0));
-  return d;
-}
-
-/**
- * STRICT: Seed is disabled in production. No override.
- */
-function mustNotRunInProd() {
-  if (String(process.env.NODE_ENV || "").toLowerCase() === "production") {
-    console.error("❌ Seed is disabled in production.");
-    process.exit(1);
-  }
-}
-
-/**
- * Require seed env vars; exit 1 with clear message if any missing.
- * Never log plaintext passwords.
- */
-function validateSeedEnv() {
-  const required = [
-    "SEED_ADMIN_EMAIL",
-    "SEED_ADMIN_PASSWORD",
-    "SEED_STAFF_EMAIL",
-    "SEED_STAFF_PASSWORD",
-    "SEED_TEST_EMAIL",
-    "SEED_TEST_PASSWORD",
-  ];
-  const missing = required.filter((k) => !process.env[k] || String(process.env[k]).trim() === "");
-  if (missing.length) {
-    console.error(`Missing required env for seed: ${missing.join(", ")}. Set them before running seed.`);
-    process.exit(1);
-  }
-}
-
-function slugFromSku(sku) {
-  return String(sku || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
+import {
+  toMinorSafe,
+  nowPlusDays,
+  slugFromSku,
+  validateSeedEnv,
+  mustNotRunInProd,
+  buildOrderPricing,
+  buildOrderShipping,
+  getNextOrderNumber,
+} from "./seed.utils.js";
 
 async function wipeDatabase() {
   console.log("🧹 WIPING DATABASE...");
@@ -115,6 +73,7 @@ async function wipeDatabase() {
 
     { model: CouponRedemption, name: "Coupon Redemptions" },
     { model: CouponReservation, name: "Coupon Reservations" },
+    { model: CouponUserUsage, name: "Coupon User Usage" },
 
     { model: Review, name: "Reviews" },
     { model: Gift, name: "Gifts" },
@@ -381,7 +340,6 @@ async function createProducts(categories) {
         views7d: 320,
         cartAdds30d: 80,
         wishlistAdds30d: 45,
-        updatedAt: new Date(),
       },
     },
     {
@@ -413,7 +371,6 @@ async function createProducts(categories) {
         views7d: 210,
         cartAdds30d: 55,
         wishlistAdds30d: 18,
-        updatedAt: new Date(),
       },
     },
     {
@@ -445,7 +402,6 @@ async function createProducts(categories) {
         views7d: 260,
         cartAdds30d: 63,
         wishlistAdds30d: 29,
-        updatedAt: new Date(),
       },
     },
     {
@@ -477,7 +433,6 @@ async function createProducts(categories) {
         views7d: 120,
         cartAdds30d: 31,
         wishlistAdds30d: 11,
-        updatedAt: new Date(),
       },
     },
     {
@@ -509,7 +464,6 @@ async function createProducts(categories) {
         views7d: 90,
         cartAdds30d: 20,
         wishlistAdds30d: 7,
-        updatedAt: new Date(),
       },
     },
     {
@@ -541,7 +495,6 @@ async function createProducts(categories) {
         views7d: 140,
         cartAdds30d: 28,
         wishlistAdds30d: 15,
-        updatedAt: new Date(),
       },
     },
     {
@@ -573,7 +526,6 @@ async function createProducts(categories) {
         views7d: 180,
         cartAdds30d: 44,
         wishlistAdds30d: 21,
-        updatedAt: new Date(),
       },
     },
     {
@@ -605,7 +557,6 @@ async function createProducts(categories) {
         views7d: 110,
         cartAdds30d: 25,
         wishlistAdds30d: 9,
-        updatedAt: new Date(),
       },
     },
     {
@@ -637,7 +588,6 @@ async function createProducts(categories) {
         views7d: 95,
         cartAdds30d: 21,
         wishlistAdds30d: 6,
-        updatedAt: new Date(),
       },
     },
     {
@@ -669,8 +619,55 @@ async function createProducts(categories) {
         views7d: 70,
         cartAdds30d: 18,
         wishlistAdds30d: 5,
-        updatedAt: new Date(),
       },
+    },
+    // Product with variants (for BUY_X_GET_Y and variant gift)
+    {
+      titleHe: "שמן זקן – מגוון ריחות",
+      titleAr: "زيت لحية – تشكيلة روائح",
+      descriptionHe: "שמן זקן באריזה אחידה, לבחירת ריח: רענן או הדרים.",
+      descriptionAr: "زيت لحية بعبوة موحدة، اختيار الرائحة: منعش أو حمضيات.",
+      price: 65,
+      stock: 0,
+      categoryId: catBeard._id,
+      brand: "BarberZone",
+      sku: "BZ-BEARD-OIL-VAR",
+      tags: ["beard", "oil", "variants"],
+      images: [
+        {
+          url: "https://images.unsplash.com/photo-1585232351009-aa87416fca90?w=1200&auto=format&fit=crop",
+          secureUrl:
+            "https://images.unsplash.com/photo-1585232351009-aa87416fca90?w=1200&auto=format&fit=crop",
+          altHe: "שמן זקן מגוון",
+          altAr: "زيت لحية تشكيلة",
+          isPrimary: true,
+          sortOrder: 0,
+        },
+      ],
+      stats: {
+        soldCount30d: 12,
+        ratingAvg: 4.5,
+        ratingCount: 8,
+        views7d: 90,
+        cartAdds30d: 22,
+        wishlistAdds30d: 10,
+      },
+      variants: [
+        {
+          sku: "BZ-BEARD-OIL-VAR-FRESH",
+          stock: 40,
+          attributes: [
+            { key: "scent", type: "enum", valueKey: "fresh", value: "fresh", unit: "" },
+          ],
+        },
+        {
+          sku: "BZ-BEARD-OIL-VAR-CITRUS",
+          stock: 35,
+          attributes: [
+            { key: "scent", type: "enum", valueKey: "citrus", value: "citrus", unit: "" },
+          ],
+        },
+      ],
     },
   ];
 
@@ -924,8 +921,6 @@ async function createPromos(products, categories) {
     usageLimit: 500,
     usedCount: 0,
     reservedCount: 0,
-    usedByOrders: [],
-    reservedByOrders: [],
     startAt: nowPlusDays(-1),
     endAt: nowPlusDays(60),
     isActive: true,
@@ -982,7 +977,34 @@ async function createPromos(products, categories) {
     isActive: true,
   });
 
-  // Gift: free sample for orders above 199₪
+  // BUY_X_GET_Y: buy first product (pomade), get second (wax) free
+  const offerBuyXGetY =
+    firstProduct && secondProduct
+      ? await Offer.create({
+          nameHe: "קנה פומדה קבל ווקס במתנה",
+          nameAr: "اشتري بوميد واحصل على واكس هدية",
+          name: "Buy Pomade Get Wax",
+          type: "BUY_X_GET_Y",
+          value: 0,
+          minTotal: 0,
+          productIds: [],
+          categoryIds: [],
+          buyProductId: firstProduct._id,
+          buyVariantId: null,
+          buyQty: 1,
+          getProductId: secondProduct._id,
+          getVariantId: null,
+          getQty: 1,
+          maxDiscount: null,
+          stackable: true,
+          priority: 85,
+          startAt: nowPlusDays(-1),
+          endAt: nowPlusDays(30),
+          isActive: true,
+        })
+      : null;
+
+  // Gift: free sample for orders above 199₪ (qty 1; no variant)
   let gift = null;
   if (firstProduct) {
     gift = await Gift.create({
@@ -990,6 +1012,8 @@ async function createPromos(products, categories) {
       nameAr: "هدية عند طلب فوق 199₪",
       name: "Gift over 199 ILS",
       giftProductId: firstProduct._id,
+      giftVariantId: null,
+      qty: 1,
       minOrderTotal: 199,
       requiredProductId: null,
       requiredCategoryId: null,
@@ -1000,7 +1024,59 @@ async function createPromos(products, categories) {
   }
 
   console.log("✅ Promos created");
-  return { coupon, campaign, offerPercent, offerFreeShipping, gift };
+  return { coupon, campaign, offerPercent, offerFreeShipping, offerBuyXGetY, gift };
+}
+
+/* =========================
+   Verification
+========================= */
+
+async function runVerification() {
+  const counts = {
+    User: await User.countDocuments(),
+    Category: await Category.countDocuments(),
+    Product: await Product.countDocuments(),
+    ProductAttribute: await ProductAttribute.countDocuments(),
+    Order: await Order.countDocuments(),
+    Coupon: await Coupon.countDocuments(),
+    Campaign: await Campaign.countDocuments(),
+    Offer: await Offer.countDocuments(),
+    Gift: await Gift.countDocuments(),
+    DeliveryArea: await DeliveryArea.countDocuments(),
+    PickupPoint: await PickupPoint.countDocuments(),
+    SiteSettings: await SiteSettings.countDocuments(),
+    HomeLayout: await HomeLayout.countDocuments(),
+    ContentPage: await ContentPage.countDocuments(),
+    Review: await Review.countDocuments(),
+    Counter: await Counter.countDocuments(),
+    CouponRedemption: await CouponRedemption.countDocuments(),
+    CouponUserUsage: await CouponUserUsage.countDocuments(),
+  };
+
+  console.log("  Created/updated counts:");
+  Object.entries(counts).forEach(([name, n]) => console.log(`    ${name}: ${n}`));
+
+  // Dangling refs: every order has valid userId; every order item has valid productId
+  const orders = await Order.find().select("userId items").lean();
+  const userIds = new Set((await User.find().select("_id").lean()).map((u) => u._id.toString()));
+  const productIds = new Set((await Product.find().select("_id").lean()).map((p) => p._id.toString()));
+
+  let refErrors = 0;
+  for (const order of orders) {
+    if (!order.userId || !userIds.has(order.userId.toString())) {
+      console.warn(`  ⚠ Order ${order._id}: missing or invalid userId`);
+      refErrors++;
+    }
+    for (const item of order.items || []) {
+      if (!item.productId || !productIds.has(item.productId.toString())) {
+        console.warn(`  ⚠ Order ${order._id} item: missing or invalid productId`);
+        refErrors++;
+      }
+    }
+  }
+  if (refErrors === 0) {
+    console.log("  ✅ No dangling references (orders → users, order items → products).");
+  }
 }
 
 /* =========================
@@ -1022,9 +1098,9 @@ async function main() {
     const categories = await createCategories();
     const products = await createProducts(categories);
 
-    await createShipping();
+    const shipping = await createShipping();
     await createSettings();
-    await createPromos(products, categories);
+    const promos = await createPromos(products, categories);
 
     // Optional: seed a couple of reviews (safe + moderated)
     if (products?.length >= 2) {
@@ -1056,7 +1132,7 @@ async function main() {
 
     // Create sample orders for ranking data
     if (products?.length > 0 && user) {
-      await createOrders(products, user);
+      await createOrders(products, user, shipping, promos);
     }
 
     // Create sample ProductSignalDaily records to support ranking recalculation
@@ -1070,6 +1146,10 @@ async function main() {
     const { recalculateProductRanking } = await import("../services/ranking.service.js");
     await recalculateProductRanking();
     console.log("✅ Ranking stats updated");
+
+    // Verification: counts + sanity checks
+    console.log("\n📋 Verification...");
+    await runVerification();
 
     console.log("\n✅ SEED COMPLETED SUCCESSFULLY\n");
     console.log("🔐 Accounts created (emails only):");
@@ -1154,13 +1234,23 @@ async function createRankingSignals(products) {
   }
 }
 
-async function createOrders(products, user) {
+async function createOrders(products, user, shipping, promos) {
   console.log("📦 Creating sample orders...");
+
+  const areas = shipping?.areas ?? [];
+  const firstArea = areas[0];
+
+  // Seed Counter so we can assign order numbers (BB-YYYY-NNNNNN)
+  const year = new Date().getFullYear();
+  await Counter.findOneAndUpdate(
+    { key: "order", year },
+    { $setOnInsert: { key: "order", year, seq: 0 } },
+    { upsert: true }
+  );
 
   const paidOrders = [];
 
-  // Create a few paid orders to populate "best sellers" and "popular"
-  // Order 1: Product 0 (Hair Pomade) - 2 units
+  // Order 1: No discount, DELIVERY
   const order1Subtotal = products[0].price * 2;
   const order1ShippingFee = 25;
   const order1Total = order1Subtotal + order1ShippingFee;
@@ -1168,6 +1258,7 @@ async function createOrders(products, user) {
   paidOrders.push({
     userId: user._id,
     paymentMethod: "cod",
+    orderNumber: await getNextOrderNumber(Counter),
     items: [
       {
         productId: products[0]._id,
@@ -1177,34 +1268,30 @@ async function createOrders(products, user) {
         qty: 2,
         unitPrice: products[0].price,
         categoryId: products[0].categoryId,
-      }
+        variantId: "",
+        variantSnapshot: {},
+      },
     ],
-    pricing: {
+    pricing: buildOrderPricing({
       subtotal: order1Subtotal,
       shippingFee: order1ShippingFee,
       total: order1Total,
-      discounts: {
-        coupon: { code: null, amount: 0 },
-        campaign: { amount: 0 },
-        offer: { amount: 0 },
-      },
-    },
-    shipping: {
+    }),
+    shipping: buildOrderShipping({
       mode: "DELIVERY",
       phone: "0500000000",
-      address: {
-        fullName: user.name,
-        phone: "0500000000",
-        city: "Tel Aviv",
-        street: "Rothschild 1",
-      },
-    },
+      fullName: user.name,
+      city: "Tel Aviv",
+      street: "Rothschild 1",
+      deliveryAreaId: firstArea?._id ?? null,
+      deliveryAreaName: firstArea ? firstArea.nameHe || firstArea.name : "",
+    }),
     status: "delivered",
     paidAt: new Date(),
     deliveredAt: new Date(),
   });
 
-  // Order 2: Product 0 (Hair Pomade) + Product 2 (Beard Oil)
+  // Order 2: No discount, STORE_PICKUP
   if (products[2]) {
     const order2Subtotal = products[0].price + products[2].price;
     const order2ShippingFee = 0;
@@ -1213,6 +1300,7 @@ async function createOrders(products, user) {
     paidOrders.push({
       userId: user._id,
       paymentMethod: "cod",
+      orderNumber: await getNextOrderNumber(Counter),
       items: [
         {
           productId: products[0]._id,
@@ -1222,6 +1310,8 @@ async function createOrders(products, user) {
           qty: 1,
           unitPrice: products[0].price,
           categoryId: products[0].categoryId,
+          variantId: "",
+          variantSnapshot: {},
         },
         {
           productId: products[2]._id,
@@ -1231,38 +1321,118 @@ async function createOrders(products, user) {
           qty: 1,
           unitPrice: products[2].price,
           categoryId: products[2].categoryId,
-        }
+          variantId: "",
+          variantSnapshot: {},
+        },
       ],
-      pricing: {
+      pricing: buildOrderPricing({
         subtotal: order2Subtotal,
         shippingFee: order2ShippingFee,
         total: order2Total,
-        discounts: {
-          coupon: { code: null, amount: 0 },
-          campaign: { amount: 0 },
-          offer: { amount: 0 },
-        },
-      },
-      shipping: {
+      }),
+      shipping: buildOrderShipping({
         mode: "STORE_PICKUP",
         phone: "0500000000",
-        address: {
-          fullName: user.name,
-          phone: "0500000000",
-        },
-      },
+        fullName: user.name,
+      }),
       status: "delivered",
       paidAt: new Date(),
       deliveredAt: new Date(),
     });
   }
 
-  // Create orders using Order model
+  // Create orders 1 and 2 first
   for (const orderData of paidOrders) {
     await Order.create(orderData);
   }
 
-  console.log(`✅ Created ${paidOrders.length} sample orders`);
+  // Order 3: With campaign + coupon (and record redemption)
+  let order3Created = false;
+  if (products[1] && promos?.coupon && promos?.campaign) {
+    const subtotalRaw = products[0].price * 2 + products[1].price; // 59.9*2 + 54.9
+    const campaignAmount = Math.round((subtotalRaw * promos.campaign.value) / 100);
+    const couponAmount = Math.min(
+      Math.round((subtotalRaw * promos.coupon.value) / 100),
+      promos.coupon.maxDiscount ?? 9999
+    );
+    const order3Subtotal = subtotalRaw;
+    const order3ShippingFee = 30;
+    const order3Total = order3Subtotal - campaignAmount - couponAmount + order3ShippingFee;
+
+    const order3 = await Order.create({
+      userId: user._id,
+      paymentMethod: "cod",
+      orderNumber: await getNextOrderNumber(Counter),
+      items: [
+        {
+          productId: products[0]._id,
+          titleHe: products[0].titleHe,
+          titleAr: products[0].titleAr || "",
+          title: products[0].titleHe,
+          qty: 2,
+          unitPrice: products[0].price,
+          categoryId: products[0].categoryId,
+          variantId: "",
+          variantSnapshot: {},
+        },
+        {
+          productId: products[1]._id,
+          titleHe: products[1].titleHe,
+          titleAr: products[1].titleAr || "",
+          title: products[1].titleHe,
+          qty: 1,
+          unitPrice: products[1].price,
+          categoryId: products[1].categoryId,
+          variantId: "",
+          variantSnapshot: {},
+        },
+      ],
+      pricing: buildOrderPricing({
+        subtotal: order3Subtotal,
+        shippingFee: order3ShippingFee,
+        total: Math.max(0, order3Total),
+        couponCode: promos.coupon.code,
+        couponAmount,
+        campaignAmount,
+        campaignId: promos.campaign._id,
+      }),
+      shipping: buildOrderShipping({
+        mode: "DELIVERY",
+        phone: "0501111111",
+        fullName: user.name,
+        city: "Haifa",
+        street: "Herzl 10",
+        deliveryAreaId: firstArea?._id ?? null,
+        deliveryAreaName: firstArea ? firstArea.nameHe || firstArea.name : "",
+      }),
+      status: "delivered",
+      paidAt: new Date(),
+      deliveredAt: new Date(),
+    });
+
+    // Record coupon redemption and per-user usage (server-consistent)
+    await CouponRedemption.create({
+      couponId: promos.coupon._id,
+      orderId: order3._id,
+      userId: user._id,
+      couponCode: promos.coupon.code,
+      discountAmount: couponAmount,
+      redeemedAt: new Date(),
+    });
+    await CouponUserUsage.findOneAndUpdate(
+      { couponId: promos.coupon._id, userId: user._id },
+      { $inc: { usedCount: 1 } },
+      { upsert: true, setDefaultsOnInsert: true, new: true }
+    );
+    await Coupon.updateOne(
+      { _id: promos.coupon._id },
+      { $inc: { usedCount: 1 } }
+    );
+    order3Created = true;
+  }
+
+  const totalOrders = paidOrders.length + (order3Created ? 1 : 0);
+  console.log(`✅ Created ${totalOrders} sample orders`);
 }
 
 main();

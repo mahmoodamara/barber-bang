@@ -477,10 +477,10 @@ router.delete(
  * ============================
  * GET /:id
  * ============================
- * Constrained to ObjectId to avoid shadowing static routes.
+ * Static routes (/, /config, /orphans) are defined above; invalid id returns 400.
  */
 router.get(
-  `/:id(${OBJECT_ID_RE})`,
+  "/:id",
   requireAuth(),
   requirePermission(PERMISSIONS.PRODUCTS_WRITE),
   async (req, res) => {

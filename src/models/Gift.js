@@ -9,6 +9,11 @@ const giftSchema = new mongoose.Schema(
     // Legacy
     name: { type: String, default: "", trim: true },
     giftProductId: { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: true },
+    // Optional: specific variant as gift (for products with variants)
+    giftVariantId: { type: mongoose.Schema.Types.ObjectId, default: null },
+
+    // Quantity granted per order when rule matches (default 1, max 50)
+    qty: { type: Number, min: 1, max: 50, default: 1 },
 
     // rules (any of them can be set)
     minOrderTotal: { type: Number, default: null, min: 0 },
