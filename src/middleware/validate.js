@@ -8,11 +8,10 @@ export function validate(schema) {
     delete cleanQuery.lang;
     delete cleanQuery.locale;
 
-    const result = schema.safeParse({
-      body: req.body,
-      query: cleanQuery,
-      params: req.params,
-    });
+    const payload = { body: req.body, params: req.params };
+    if (req.method === "GET") payload.query = cleanQuery;
+
+    const result = schema.safeParse(payload);
 
     if (!result.success) {
       // ✅ forward ZodError to central errorHandler
