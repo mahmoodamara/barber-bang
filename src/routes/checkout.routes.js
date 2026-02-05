@@ -181,7 +181,33 @@ async function getNextOrderNumber(session = null) {
    Cart / Shipping helpers
 ============================ */
 
+/**
+ * Clean invalid cart items (deleted/inactive products, deleted variants) before checkout.
+ * Prevents ghost items and ensures quote uses only valid cart data.
+ */
+async function cleanupCartInvalidItems(userId) {
+  const user = await User.findById(userId).populate("cart.productId");
+  if (!user || !user.cart?.length) return;
+
+  const keep = [];
+  for (const ci of user.cart) {
+    const p = ci.productId;
+    if (!p || !p._id || p.isActive === false || p.isDeleted === true) continue;
+    const hasVariants = Array.isArray(p.variants) && p.variants.length > 0;
+    const variantIdStr = String(ci.variantId || "");
+    const variant = hasVariants ? p.variants.find((v) => String(v?._id || "") === variantIdStr) : null;
+    if (hasVariants && variantIdStr && !variant) continue;
+    keep.push(ci);
+  }
+
+  if (keep.length !== (user.cart || []).length) {
+    await User.updateOne({ _id: userId }, { $set: { cart: keep } }).catch(() => {});
+  }
+}
+
 async function getCartItemsOrThrow(userId) {
+  await cleanupCartInvalidItems(userId);
+
   const user = await User.findById(userId).select("cart").lean();
   if (!user) throw makeErr(401, "UNAUTHORIZED", "User not found");
 

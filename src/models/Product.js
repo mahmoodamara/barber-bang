@@ -2,6 +2,12 @@
 import mongoose from "mongoose";
 
 import { generateUniqueSlug } from "../utils/slug.js";
+import {
+  normalizeKey,
+  normalizeKeyPart,
+  toMinorSafe,
+  buildLegacyAttributes,
+} from "../utils/productHelpers.js";
 
 const { Schema } = mongoose;
 
@@ -199,57 +205,8 @@ const productSchema = new Schema(
  * Data Hygiene (Critical)
  * ============================
  * Prevent silent broken products & keep legacy synced.
+ * toMinorSafe, normalizeKey, normalizeKeyPart, buildLegacyAttributes from productHelpers.js
  */
-function toMinorSafe(major) {
-  const n = Number(major || 0);
-  if (!Number.isFinite(n)) return 0;
-  return Math.max(0, Math.round((n + Number.EPSILON) * 100));
-}
-
-function normalizeKeyPart(v) {
-  const s = String(v ?? "")
-    .trim()
-    .toLowerCase();
-  return s ? s.replace(/\s+/g, "_") : "";
-}
-
-function normalizeKey(raw) {
-  const v = String(raw || "")
-    .trim()
-    .toLowerCase();
-  if (!v) return "";
-  return v
-    .replace(/\s+/g, "_")
-    .replace(/[^a-z0-9_]/g, "_")
-    .replace(/_+/g, "_")
-    .replace(/^_+|_+$/g, "");
-}
-
-function buildLegacyAttributes(variant) {
-  if (!variant) return [];
-  const legacy = [
-    { key: "volume_ml", type: "number", value: variant.volumeMl, unit: "ml" },
-    { key: "weight_g", type: "number", value: variant.weightG, unit: "g" },
-    { key: "pack_count", type: "number", value: variant.packCount, unit: "" },
-    { key: "scent", type: "text", value: variant.scent },
-    { key: "hold_level", type: "text", value: variant.holdLevel },
-    { key: "finish_type", type: "text", value: variant.finishType },
-    { key: "skin_type", type: "text", value: variant.skinType },
-  ];
-
-  return legacy
-    .map((a) => {
-      if (a.type === "number") {
-        const n = Number(a.value);
-        if (!Number.isFinite(n)) return null;
-        return { ...a, value: n };
-      }
-      const s = String(a.value || "").trim();
-      if (!s) return null;
-      return { ...a, value: s };
-    })
-    .filter(Boolean);
-}
 
 function normalizeVariantAttributes(attrs = []) {
   const out = [];

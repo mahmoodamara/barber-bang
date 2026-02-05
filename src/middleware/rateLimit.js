@@ -221,6 +221,38 @@ export const limitAuth = createLimiter({
   messageText: "Too many auth attempts. Try again in a minute.",
 });
 
+/** Stricter limit for login only (brute-force protection) */
+export const limitLogin = createLimiter({
+  windowMs: 60_000,
+  limit: 6,
+  messageCode: "LOGIN_RATE_LIMITED",
+  messageText: "Too many login attempts. Try again in a minute.",
+});
+
+/** Limit for register (prevents bulk signups) */
+export const limitRegister = createLimiter({
+  windowMs: 60_000,
+  limit: 5,
+  messageCode: "REGISTER_RATE_LIMITED",
+  messageText: "Too many registration attempts. Try again in a minute.",
+});
+
+/** General auth routes (me, refresh, logout, change-password) */
+export const limitAuthGeneral = createLimiter({
+  windowMs: 60_000,
+  limit: 30,
+  messageCode: "AUTH_RATE_LIMITED",
+  messageText: "Too many requests. Try again in a minute.",
+});
+
+/** Forgot password: strict limit to prevent abuse and enumeration */
+export const limitForgotPassword = createLimiter({
+  windowMs: 15 * 60_000, // 15 minutes
+  limit: 3,
+  messageCode: "FORGOT_PASSWORD_RATE_LIMITED",
+  messageText: "Too many reset requests. Try again later.",
+});
+
 export const limitCheckoutQuote = createLimiter({
   windowMs: 60_000,
   limit: 40,
@@ -287,6 +319,17 @@ export const limitCouponValidate = createLimiter({
   limit: 30,
   messageCode: "COUPON_VALIDATE_RATE_LIMITED",
   messageText: "Too many coupon validation requests. Please slow down.",
+});
+
+/**
+ * ✅ Rate limit for cart endpoints
+ * Prevents abuse of add/set-qty/remove/clear operations
+ */
+export const limitCart = createLimiter({
+  windowMs: 60_000,
+  limit: 80,
+  messageCode: "CART_RATE_LIMITED",
+  messageText: "Too many cart requests. Please slow down.",
 });
 
 /**

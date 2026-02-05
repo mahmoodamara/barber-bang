@@ -57,6 +57,8 @@ const userSchema = new mongoose.Schema(
     email: { type: String, required: true, unique: true, lowercase: true, trim: true },
     passwordHash: { type: String, required: true },
 
+    isEmailVerified: { type: Boolean, default: false },
+
     // Keep enum additive (support staff later if your auth middleware already uses it)
     role: { type: String, enum: ["user", "admin", "staff"], default: "user" },
 
@@ -81,6 +83,10 @@ const userSchema = new mongoose.Schema(
     isBlocked: { type: Boolean, default: false },
     blockedAt: { type: Date, default: null },
     blockedReason: { type: String, default: "", maxlength: 400 },
+
+    // ✅ Account lockout after failed login attempts
+    loginAttempts: { type: Number, default: 0, min: 0 },
+    lockoutUntil: { type: Date, default: null },
   },
   { timestamps: true },
 );

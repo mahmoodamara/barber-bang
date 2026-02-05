@@ -107,10 +107,16 @@ const createSchema = z.object({
       isActive: z.boolean().optional(),
       sortOrder: z.number().int().optional(),
       parentId: objectIdSchema.optional(),
-      seoTitleHe: z.string().max(160).optional(),
-      seoTitleAr: z.string().max(160).optional(),
-      seoDescHe: z.string().max(400).optional(),
-      seoDescAr: z.string().max(400).optional(),
+      // Model fields (metaTitle*/metaDescription*)
+      metaTitleHe: z.string().max(70).optional(),
+      metaTitleAr: z.string().max(70).optional(),
+      metaDescriptionHe: z.string().max(160).optional(),
+      metaDescriptionAr: z.string().max(160).optional(),
+      // Aliases for backward compatibility (map to meta* when saving)
+      seoTitleHe: z.string().max(70).optional(),
+      seoTitleAr: z.string().max(70).optional(),
+      seoDescHe: z.string().max(160).optional(),
+      seoDescAr: z.string().max(160).optional(),
     })
     .strict(),
 });
@@ -126,10 +132,14 @@ const updateSchema = z.object({
       isActive: z.boolean().optional(),
       sortOrder: z.number().int().optional(),
       parentId: objectIdSchema.optional().nullable(),
-      seoTitleHe: z.string().max(160).optional(),
-      seoTitleAr: z.string().max(160).optional(),
-      seoDescHe: z.string().max(400).optional(),
-      seoDescAr: z.string().max(400).optional(),
+      metaTitleHe: z.string().max(70).optional(),
+      metaTitleAr: z.string().max(70).optional(),
+      metaDescriptionHe: z.string().max(160).optional(),
+      metaDescriptionAr: z.string().max(160).optional(),
+      seoTitleHe: z.string().max(70).optional(),
+      seoTitleAr: z.string().max(70).optional(),
+      seoDescHe: z.string().max(160).optional(),
+      seoDescAr: z.string().max(160).optional(),
     })
     .strict(),
 });
@@ -211,6 +221,7 @@ router.get("/:id", validate(idParamSchema), async (req, res) => {
 
 router.post("/", validate(createSchema), async (req, res) => {
   try {
+    const b = req.validated.body;
     const {
       nameHe,
       nameAr,
@@ -219,17 +230,19 @@ router.post("/", validate(createSchema), async (req, res) => {
       isActive,
       sortOrder,
       parentId,
-      seoTitleHe,
-      seoTitleAr,
-      seoDescHe,
-      seoDescAr,
-    } = req.validated.body;
+    } = b;
 
     // Sanitize inputs
     const sanitizedNameHe = sanitizeText(nameHe, 80);
     const sanitizedNameAr = sanitizeText(nameAr || "", 80);
     const sanitizedSlug = sanitizeText(slug || "", 60).toLowerCase().replace(/\s+/g, "-");
     const sanitizedImageUrl = sanitizeText(imageUrl || "", 500);
+
+    // Map to model fields: metaTitle* / metaDescription* (accept seo* aliases)
+    const metaTitleHe = sanitizeText(b.metaTitleHe ?? b.seoTitleHe ?? "", 70);
+    const metaTitleAr = sanitizeText(b.metaTitleAr ?? b.seoTitleAr ?? "", 70);
+    const metaDescriptionHe = sanitizeText(b.metaDescriptionHe ?? b.seoDescHe ?? "", 160);
+    const metaDescriptionAr = sanitizeText(b.metaDescriptionAr ?? b.seoDescAr ?? "", 160);
 
     const item = await Category.create({
       nameHe: sanitizedNameHe,
@@ -240,10 +253,10 @@ router.post("/", validate(createSchema), async (req, res) => {
       isActive: isActive ?? true,
       sortOrder: Number.isFinite(sortOrder) ? sortOrder : 0,
       parentId: parentId || null,
-      seoTitleHe: sanitizeText(seoTitleHe || "", 160),
-      seoTitleAr: sanitizeText(seoTitleAr || "", 160),
-      seoDescHe: sanitizeText(seoDescHe || "", 400),
-      seoDescAr: sanitizeText(seoDescAr || "", 400),
+      metaTitleHe,
+      metaTitleAr,
+      metaDescriptionHe,
+      metaDescriptionAr,
     });
 
     return sendCreated(res, mapCategory(item, req.lang));
@@ -268,6 +281,7 @@ router.put("/:id", validate(updateSchema), async (req, res) => {
       throw makeErr(400, "INVALID_ID", "Invalid category id");
     }
 
+    const b = req.validated.body;
     const {
       nameHe,
       nameAr,
@@ -276,11 +290,7 @@ router.put("/:id", validate(updateSchema), async (req, res) => {
       isActive,
       sortOrder,
       parentId,
-      seoTitleHe,
-      seoTitleAr,
-      seoDescHe,
-      seoDescAr,
-    } = req.validated.body;
+    } = b;
 
     // Build update object with sanitized values
     const update = {};
@@ -306,10 +316,19 @@ router.put("/:id", validate(updateSchema), async (req, res) => {
     if (parentId !== undefined) {
       update.parentId = parentId || null;
     }
-    if (seoTitleHe !== undefined) update.seoTitleHe = sanitizeText(seoTitleHe, 160);
-    if (seoTitleAr !== undefined) update.seoTitleAr = sanitizeText(seoTitleAr, 160);
-    if (seoDescHe !== undefined) update.seoDescHe = sanitizeText(seoDescHe, 400);
-    if (seoDescAr !== undefined) update.seoDescAr = sanitizeText(seoDescAr, 400);
+    // Map to model fields: metaTitle* / metaDescription* (accept seo* aliases)
+    if (b.metaTitleHe !== undefined || b.seoTitleHe !== undefined) {
+      update.metaTitleHe = sanitizeText(b.metaTitleHe ?? b.seoTitleHe ?? "", 70);
+    }
+    if (b.metaTitleAr !== undefined || b.seoTitleAr !== undefined) {
+      update.metaTitleAr = sanitizeText(b.metaTitleAr ?? b.seoTitleAr ?? "", 70);
+    }
+    if (b.metaDescriptionHe !== undefined || b.seoDescHe !== undefined) {
+      update.metaDescriptionHe = sanitizeText(b.metaDescriptionHe ?? b.seoDescHe ?? "", 160);
+    }
+    if (b.metaDescriptionAr !== undefined || b.seoDescAr !== undefined) {
+      update.metaDescriptionAr = sanitizeText(b.metaDescriptionAr ?? b.seoDescAr ?? "", 160);
+    }
 
     if (Object.keys(update).length === 0) {
       throw makeErr(400, "VALIDATION_ERROR", "No valid fields to update");

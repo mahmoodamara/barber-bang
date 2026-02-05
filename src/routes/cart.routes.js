@@ -4,6 +4,7 @@ import { z } from "zod";
 
 import { requireAuth } from "../middleware/auth.js";
 import { validate } from "../middleware/validate.js";
+import cartGuestRoutes from "./cart.guest.routes.js";
 import { User } from "../models/User.js";
 import { Product } from "../models/Product.js";
 import { computeEffectiveUnitPriceMinor } from "../services/pricing.service.js";
@@ -199,6 +200,9 @@ async function getPopulatedCart(userId, { lang = "he" } = {}) {
  * Routes
  * ========================= */
 
+// Guest cart (no auth) - must be before "/" to avoid conflict
+router.use("/guest", cartGuestRoutes);
+
 router.get("/", requireAuth(), async (req, res) => {
   try {
     const items = await getPopulatedCart(req.user._id, { lang: req.lang });
@@ -215,12 +219,14 @@ const addSchema = z.object({
     variantId: z.string().min(1).optional(),
     // If true, sets qty instead of adding (prevents double-add on auth redirect)
     idempotent: z.boolean().optional(),
+    // If true, reject add when product is out of stock or qty exceeds available stock
+    validateStock: z.boolean().optional(),
   }),
 });
 
 router.post("/add", requireAuth(), validate(addSchema), async (req, res) => {
   try {
-    const { productId, qty, variantId, idempotent } = req.validated.body;
+    const { productId, qty, variantId, idempotent, validateStock } = req.validated.body;
 
     const product = await Product.findById(productId);
     if (!product || product.isActive === false || product.isDeleted === true) {
@@ -258,6 +264,32 @@ router.post("/add", requireAuth(), validate(addSchema), async (req, res) => {
         x.productId.toString() === productId &&
         String(x.variantId || "") === String(idMatch || "")
     );
+
+    const currentStock = hasVariants ? (variant?.stock ?? 0) : (product.stock ?? 0);
+    if (validateStock && currentStock <= 0) {
+      return res.status(409).json(
+        errorPayload(req, "OUT_OF_STOCK", "Product is out of stock", {
+          productId,
+          variantId: idMatch || undefined,
+          available: 0,
+          requested: qty,
+        })
+      );
+    }
+    if (validateStock && currentStock > 0) {
+      const existingQty = idx >= 0 ? (user.cart[idx].qty || 0) : 0;
+      const effectiveQty = idempotent ? qty : existingQty + qty;
+      if (effectiveQty > currentStock) {
+        return res.status(409).json(
+          errorPayload(req, "OUT_OF_STOCK_PARTIAL", "Requested quantity exceeds available stock", {
+            productId,
+            variantId: idMatch || undefined,
+            available: currentStock,
+            requested: effectiveQty,
+          })
+        );
+      }
+    }
 
     if (idx >= 0) {
       // If idempotent=true, set qty directly (prevents double-add on auth redirect)
@@ -383,6 +415,7 @@ const removeSchema = z.object({
  * - Do NOT depend on Product.findById() here.
  * - Allows removing cart lines even if product/variant was deleted or became inactive.
  * - Prevents "stuck cart items" UX.
+ * - For variant products (cart lines with variantId), variantId is required to remove a specific variant.
  */
 router.post("/remove", requireAuth(), validate(removeSchema), async (req, res) => {
   try {
@@ -391,6 +424,16 @@ router.post("/remove", requireAuth(), validate(removeSchema), async (req, res) =
     const user = await User.findById(req.user._id);
     if (!user) {
       return res.status(401).json(errorPayload(req, "UNAUTHORIZED", "Unauthorized"));
+    }
+
+    const matchingLines = user.cart.filter((x) => x.productId.toString() === productId);
+    const hasVariantLines = matchingLines.some((x) => String(x.variantId || "").trim() !== "");
+    if (hasVariantLines && !variantId) {
+      return res.status(400).json(
+        errorPayload(req, "VARIANT_REQUIRED", "variantId is required when removing variant products", {
+          productId,
+        })
+      );
     }
 
     const before = user.cart.length;

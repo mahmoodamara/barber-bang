@@ -5,6 +5,8 @@
  * Ensures consistent shape across /products, /wishlist, /cart endpoints.
  */
 
+import { isSaleActiveByPrice, toMinorSafe } from "./productHelpers.js";
+
 function normalizeLang(lang) {
   return String(lang || "he").toLowerCase() === "ar" ? "ar" : "he";
 }
@@ -13,20 +15,6 @@ function t(obj, field, lang) {
   const he = obj?.[`${field}He`] || obj?.[field] || "";
   const ar = obj?.[`${field}Ar`] || "";
   return lang === "ar" ? ar || he : he || ar;
-}
-
-function isSaleActiveByPrice(p, now = new Date()) {
-  if (p?.salePrice == null) return false;
-  if (!(Number(p.salePrice) < Number(p.price))) return false;
-  if (p.saleStartAt && now < new Date(p.saleStartAt)) return false;
-  if (p.saleEndAt && now > new Date(p.saleEndAt)) return false;
-  return true;
-}
-
-function toMinorSafe(major) {
-  const n = Number(major || 0);
-  if (!Number.isFinite(n)) return 0;
-  return Math.max(0, Math.round((n + Number.EPSILON) * 100));
 }
 
 function mapProductImage(img, lang) {

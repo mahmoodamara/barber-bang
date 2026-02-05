@@ -19,6 +19,7 @@ import {
   limitCheckoutCreate,
   limitTrackOrder,
   limitAdmin,
+  limitCart,
 } from "./middleware/rateLimit.js";
 
 import authRoutes from "./routes/auth.routes.js";
@@ -331,15 +332,15 @@ const apiRouter = express.Router();
 // 1. Webhooks (Raw) - Already handled before json/urlencoded middleware
 // apiRouter.use("/stripe/webhook", stripeWebhookRoutes); // Handled at app-level
 
-// 2. Auth
-apiRouter.use("/auth", limitAuth, authRoutes);
+// 2. Auth (rate limits applied per-route inside auth.routes.js)
+apiRouter.use("/auth", authRoutes);
 
 // 3. User features
 apiRouter.use("/home", homeRoutes);
 apiRouter.use("/categories", categoriesRoutes);
 apiRouter.use("/products", productsRoutes);
 apiRouter.use("/products", rankingRoutes);
-apiRouter.use("/cart", cartRoutes);
+apiRouter.use("/cart", limitCart, cartRoutes);
 apiRouter.use("/shipping", shippingRoutes);
 apiRouter.use("/coupons", couponsRoutes);
 apiRouter.use("/offers", offersRoutes);

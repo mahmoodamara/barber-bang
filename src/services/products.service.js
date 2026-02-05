@@ -26,9 +26,26 @@ function toVariantObjectId(id) {
   return mongoose.Types.ObjectId.isValid(v) ? new mongoose.Types.ObjectId(v) : null;
 }
 
+/**
+ * Inventory policy (used by decrement and release):
+ * - trackInventory === false: do not decrement or restore stock; product is always "available".
+ * - allowBackorder === true: allow order even when stock < qty (stock may go negative).
+ * - Otherwise: require stock >= qty for decrement; restore on release.
+ */
+async function getProductInventoryFlags(productIds, session = null) {
+  if (!productIds.length) return new Map();
+  const products = await Product.find({ _id: { $in: productIds } })
+    .select("trackInventory allowBackorder")
+    .lean();
+  return new Map(products.map((p) => [String(p._id), p]));
+}
+
 export async function decrementStockAtomicOrThrow(items, session = null) {
   const list = normalizeItems(items);
   if (!list.length) return;
+
+  const productIds = [...new Set(list.map((it) => it.productId))];
+  const flagsByProduct = await getProductInventoryFlags(productIds, session);
 
   const updated = [];
 
@@ -38,26 +55,38 @@ export async function decrementStockAtomicOrThrow(items, session = null) {
       const variantObjId = toVariantObjectId(it.variantId);
       const isVariant = Boolean(variantObjId);
 
-      const res = isVariant
-        ? await Product.updateOne(
-            {
-              _id: it.productId,
-              isActive: true,
-              "variants._id": variantObjId,
-              "variants.stock": { $gte: qty },
-            },
-            { $inc: { "variants.$.stock": -qty } },
-            session ? { session } : {}
-          )
-        : await Product.updateOne(
-            {
-              _id: it.productId,
-              isActive: true,
-              stock: { $gte: qty },
-            },
-            { $inc: { stock: -qty } },
-            session ? { session } : {}
-          );
+      const product = flagsByProduct.get(it.productId);
+      if (!product) {
+        throw makeErr(400, "OUT_OF_STOCK", "One or more items are out of stock");
+      }
+
+      // trackInventory === false: do not decrement stock (product always "in stock")
+      if (product.trackInventory === false) {
+        continue;
+      }
+
+      const allowBackorder = product.allowBackorder === true;
+
+      const filter = {
+        _id: it.productId,
+        isActive: true,
+      };
+      if (isVariant) {
+        filter["variants._id"] = variantObjId;
+        if (!allowBackorder) {
+          filter["variants.stock"] = { $gte: qty };
+        }
+      } else {
+        if (!allowBackorder) {
+          filter.stock = { $gte: qty };
+        }
+      }
+
+      const update = isVariant
+        ? { $inc: { "variants.$.stock": -qty } }
+        : { $inc: { stock: -qty } };
+
+      const res = await Product.updateOne(filter, update, session ? { session } : {});
 
       if (Number(res?.modifiedCount || 0) !== 1) {
         throw makeErr(400, "OUT_OF_STOCK", "One or more items are out of stock");
@@ -218,23 +247,31 @@ export async function releaseStockReservation({ orderId, session = null }) {
 
   if (!reservation) return null;
 
-  for (const it of reservation.items || []) {
-    const qty = Number(it.qty || 0);
-    const variantObjId = toVariantObjectId(it.variantId);
-    const isVariant = Boolean(variantObjId);
-
-    if (isVariant) {
-      await Product.updateOne(
-        { _id: it.productId, "variants._id": variantObjId },
-        { $inc: { "variants.$.stock": qty } },
-        session ? { session } : {}
-      );
-    } else {
-      await Product.updateOne(
-        { _id: it.productId },
-        { $inc: { stock: qty } },
-        session ? { session } : {}
-      );
+  const items = reservation.items || [];
+  if (items.length) {
+    const productIds = [...new Set(items.map((it) => it.productId))];
+    const flagsByProduct = await getProductInventoryFlags(productIds, session);
+    for (const it of items) {
+      const product = flagsByProduct.get(it.productId);
+      if (product && product.trackInventory === false) {
+        continue; // We never decremented these; do not restore
+      }
+      const qty = Number(it.qty || 0);
+      const variantObjId = toVariantObjectId(it.variantId);
+      const isVariant = Boolean(variantObjId);
+      if (isVariant) {
+        await Product.updateOne(
+          { _id: it.productId, "variants._id": variantObjId },
+          { $inc: { "variants.$.stock": qty } },
+          session ? { session } : {}
+        );
+      } else {
+        await Product.updateOne(
+          { _id: it.productId },
+          { $inc: { stock: qty } },
+          session ? { session } : {}
+        );
+      }
     }
   }
 
@@ -259,18 +296,26 @@ export async function releaseExpiredReservations({ now = new Date(), limit = 200
 
     if (!updated) continue;
 
-    for (const it of r.items || []) {
-      const qty = Number(it.qty || 0);
-      const variantObjId = toVariantObjectId(it.variantId);
-      const isVariant = Boolean(variantObjId);
-
-      if (isVariant) {
-        await Product.updateOne(
-          { _id: it.productId, "variants._id": variantObjId },
-          { $inc: { "variants.$.stock": qty } }
-        );
-      } else {
-        await Product.updateOne({ _id: it.productId }, { $inc: { stock: qty } });
+    const items = r.items || [];
+    if (items.length) {
+      const productIds = [...new Set(items.map((it) => it.productId))];
+      const flagsByProduct = await getProductInventoryFlags(productIds, null);
+      for (const it of items) {
+        const product = flagsByProduct.get(it.productId);
+        if (product && product.trackInventory === false) {
+          continue;
+        }
+        const qty = Number(it.qty || 0);
+        const variantObjId = toVariantObjectId(it.variantId);
+        const isVariant = Boolean(variantObjId);
+        if (isVariant) {
+          await Product.updateOne(
+            { _id: it.productId, "variants._id": variantObjId },
+            { $inc: { "variants.$.stock": qty } }
+          );
+        } else {
+          await Product.updateOne({ _id: it.productId }, { $inc: { stock: qty } });
+        }
       }
     }
   }
