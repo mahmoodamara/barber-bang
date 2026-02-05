@@ -8,7 +8,7 @@ import { v2 as cloudinary } from "cloudinary";
  * Environment variables:
  * - CLOUDINARY_CLOUD_NAME (required)
  * - CLOUDINARY_API_KEY (required)
- * - CLOUDINARY_API_SECRET (required)
+ * - CLOUDINARY_API_SECRET (required) — must match Cloudinary Dashboard exactly; "Invalid Signature" = wrong secret on server (e.g. Render env)
  * - CLOUDINARY_FOLDER (optional, default: "barber-store")
  */
 
