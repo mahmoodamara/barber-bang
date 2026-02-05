@@ -35,12 +35,26 @@ async function validateTransactionSupport() {
   }
 }
 
+const VALID_MONGO_SCHEMES = ["mongodb://", "mongodb+srv://"];
+
+function isValidMongoUri(uri) {
+  if (!uri || typeof uri !== "string") return false;
+  const trimmed = uri.trim();
+  return VALID_MONGO_SCHEMES.some((scheme) => trimmed.startsWith(scheme));
+}
+
 export async function connectDB() {
   const uri = process.env.MONGO_URI;
   if (!uri) throw new Error("MONGO_URI is required");
+  if (!isValidMongoUri(uri)) {
+    throw new Error(
+      "MONGO_URI must start with \"mongodb://\" or \"mongodb+srv://\". " +
+        "Check Render Environment: set MONGO_URI to your MongoDB Atlas (or other) connection string."
+    );
+  }
 
   mongoose.set("strictQuery", true);
-  await mongoose.connect(uri);
+  await mongoose.connect(uri.trim());
 
   console.log("[db] connected");
 
