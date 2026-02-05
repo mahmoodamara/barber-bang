@@ -49,7 +49,7 @@ const ISRAEL_COUNTRY_CODE = "IL";
 
 /**
  * Where country code might exist in your order schema.
- * Put the REAL path first for best index usage.
+ * Order model may not define these; if missing, we treat orders as in-scope (single-country store).
  */
 const COUNTRY_PATHS = [
   "shipping.address.countryCode",
@@ -127,14 +127,19 @@ function daysAgoStartInTZ(days, tz = BUSINESS_TZ) {
 }
 
 /**
- * Build a Mongo match that filters orders to Israel only.
- * Uses $or across multiple possible schema paths.
- *
- * IMPORTANT: For best performance, normalize to ONE field and index it.
+ * Base match for dashboard orders: Israel-only when country is set, else all orders.
+ * Order schema (Order.js) does not define shipping.address.countryCode, so existing
+ * orders have no country set — we include them so revenue/counts are correct.
+ * When you add countryCode to Order and set it in checkout, orders will filter by IL.
  */
-function israelOrdersMatch() {
+function ordersScopeMatch() {
+  const isIsrael = COUNTRY_PATHS.map((path) => ({ [path]: ISRAEL_COUNTRY_CODE }));
+  const noCountrySet = COUNTRY_PATHS.map((path) => ({ [path]: { $exists: false } }));
   return {
-    $or: COUNTRY_PATHS.map((path) => ({ [path]: ISRAEL_COUNTRY_CODE })),
+    $or: [
+      ...isIsrael,
+      { $and: noCountrySet },
+    ],
   };
 }
 
@@ -193,12 +198,16 @@ function parseLatestLimit(value) {
   return Math.min(n, MAX_LATEST_LIMIT);
 }
 
-// Helpers for ReturnRequest -> Order lookup filtering (used in handler)
-function israelMatchForLookupOrder(orderFieldName) {
+/** Match for ReturnRequest $lookup: include orders that are in scope (Israel or no country set). */
+function scopeMatchForLookupOrder(orderFieldName) {
+  const isIsrael = COUNTRY_PATHS.map((path) => ({
+    [`${orderFieldName}.${path}`]: ISRAEL_COUNTRY_CODE,
+  }));
+  const noCountrySet = COUNTRY_PATHS.map((path) => ({
+    [`${orderFieldName}.${path}`]: { $exists: false },
+  }));
   return {
-    $or: COUNTRY_PATHS.map((path) => ({
-      [`${orderFieldName}.${path}`]: ISRAEL_COUNTRY_CODE,
-    })),
+    $or: [...isIsrael, { $and: noCountrySet }],
   };
 }
 
@@ -229,7 +238,7 @@ router.get("/", async (req, res) => {
     const bounds = getPeriodBounds(periodDays, BUSINESS_TZ);
     const { periodStart, periodEnd, previousPeriodStart, previousPeriodEnd } = bounds;
 
-    const israelMatch = israelOrdersMatch();
+    const ordersMatch = ordersScopeMatch();
     const ORDERS_COLLECTION = Order.collection.name;
 
     const [
@@ -252,7 +261,7 @@ router.get("/", async (req, res) => {
       Order.aggregate([
         {
           $match: {
-            ...israelMatch,
+            ...ordersMatch,
             createdAt: { $gte: todayStart },
             status: { $in: PAID_STATUSES },
           },
@@ -262,7 +271,7 @@ router.get("/", async (req, res) => {
       Order.aggregate([
         {
           $match: {
-            ...israelMatch,
+            ...ordersMatch,
             createdAt: { $gte: sevenDaysAgo },
             status: { $in: PAID_STATUSES },
           },
@@ -272,7 +281,7 @@ router.get("/", async (req, res) => {
       Order.aggregate([
         {
           $match: {
-            ...israelMatch,
+            ...ordersMatch,
             createdAt: { $gte: thirtyDaysAgo },
             status: { $in: PAID_STATUSES },
           },
@@ -282,7 +291,7 @@ router.get("/", async (req, res) => {
       Order.aggregate([
         {
           $match: {
-            ...israelMatch,
+            ...ordersMatch,
             createdAt: { $gte: periodStart },
             status: { $in: PAID_STATUSES },
           },
@@ -292,31 +301,31 @@ router.get("/", async (req, res) => {
       Order.aggregate([
         {
           $match: {
-            ...israelMatch,
+            ...ordersMatch,
             createdAt: { $gte: previousPeriodStart, $lt: previousPeriodEnd },
             status: { $in: PAID_STATUSES },
           },
         },
         { $group: { _id: null, total: { $sum: ifNullNumber("$pricing.total", 0) } } },
       ]),
-      Order.countDocuments({ ...israelMatch, createdAt: { $gte: todayStart } }),
+      Order.countDocuments({ ...ordersMatch, createdAt: { $gte: todayStart } }),
       Order.countDocuments({
-        ...israelMatch,
+        ...ordersMatch,
         createdAt: { $gte: periodStart },
       }),
       Order.countDocuments({
-        ...israelMatch,
+        ...ordersMatch,
         createdAt: { $gte: previousPeriodStart, $lt: previousPeriodEnd },
       }),
       Order.countDocuments({
-        ...israelMatch,
+        ...ordersMatch,
         status: { $in: PENDING_FULFILLMENT_STATUSES },
       }),
       ReturnRequest.aggregate([
         { $match: { status: { $in: ["requested", "approved", "received", "refund_pending"] } } },
         { $lookup: { from: ORDERS_COLLECTION, localField: "orderId", foreignField: "_id", as: "order" } },
         { $unwind: "$order" },
-        { $match: israelMatchForLookupOrder("order") },
+        { $match: scopeMatchForLookupOrder("order") },
         { $count: "count" },
       ]),
       Product.countDocuments({
@@ -325,14 +334,14 @@ router.get("/", async (req, res) => {
         stock: { $lte: 5 },
       }),
       Order.aggregate([
-        { $match: { ...israelMatch, createdAt: { $gte: periodStart } } },
+        { $match: { ...ordersMatch, createdAt: { $gte: periodStart } } },
         { $group: { _id: "$userId" } },
         { $count: "count" },
       ]),
       Order.aggregate([
         {
           $match: {
-            ...israelMatch,
+            ...ordersMatch,
             createdAt: { $gte: periodStart },
             status: { $in: PAID_STATUSES },
           },
@@ -355,7 +364,7 @@ router.get("/", async (req, res) => {
         { $limit: 10 },
         { $project: { _id: 0, productId: "$_id", title: 1, titleAr: 1, unitsSold: 1, revenue: 1 } },
       ]),
-      Order.find(israelMatch)
+      Order.find(ordersMatch)
         .sort({ createdAt: -1 })
         .limit(latestLimit)
         .select("_id orderNumber status paymentMethod pricing.total createdAt shipping.address.fullName")
@@ -365,7 +374,7 @@ router.get("/", async (req, res) => {
         { $limit: Math.min(latestLimit + 10, 60) },
         { $lookup: { from: ORDERS_COLLECTION, localField: "orderId", foreignField: "_id", as: "order" } },
         { $unwind: "$order" },
-        { $match: israelMatchForLookupOrder("order") },
+        { $match: scopeMatchForLookupOrder("order") },
         { $limit: latestLimit },
         {
           $project: {
