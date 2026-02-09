@@ -11,8 +11,15 @@ import { computeEffectiveUnitPriceMinor } from "../services/pricing.service.js";
 import { getRequestId } from "../middleware/error.js";
 import { mapCartProductDTO } from "../utils/mapProduct.js";
 import { recordProductEngagement } from "../services/ranking.service.js";
+import { setPrivateNoStore } from "../utils/response.js";
 
 const router = express.Router();
+
+// ✅ Performance: Cart responses are always private/personalized
+router.use((req, res, next) => {
+  setPrivateNoStore(res);
+  next();
+});
 
 /** =========================
  * Helpers

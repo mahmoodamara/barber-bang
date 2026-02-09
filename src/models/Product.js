@@ -155,6 +155,71 @@ const productSchema = new Schema(
     countryOfOrigin: { type: String, default: "", trim: true, maxlength: 120 },
     warrantyInfo: { type: String, default: "", trim: true, maxlength: 400 },
 
+    // Catalog governance (optional, non-breaking)
+    catalogStatus: {
+      type: String,
+      enum: ["READY", "READY_WITH_EDITS", "HOLD"],
+      default: "HOLD",
+    },
+    confidenceGrade: {
+      type: String,
+      enum: ["A", "B", "C", "D"],
+      default: "D",
+    },
+    verification: {
+      isModelVerified: { type: Boolean, default: false },
+      isCategoryVerified: { type: Boolean, default: false },
+      verifiedSourcesCount: { type: Number, default: 0, min: 0 },
+      lastVerifiedAt: { type: Date, default: null },
+      notes: { type: String, default: "", trim: true, maxlength: 4000 },
+      notesHe: { type: String, default: "", trim: true, maxlength: 4000 },
+      notesAr: { type: String, default: "", trim: true, maxlength: 4000 },
+      hasCriticalMismatch: { type: Boolean, default: false },
+    },
+    identity: {
+      internalSku: { type: String, default: "", trim: true, maxlength: 80 },
+      model: { type: String, default: "", trim: true, maxlength: 120 },
+      productLine: { type: String, default: "", trim: true, maxlength: 120 },
+    },
+    classification: {
+      categoryPrimary: { type: String, default: "", trim: true, maxlength: 120 },
+      categorySecondary: { type: String, default: "", trim: true, maxlength: 120 },
+    },
+    specs: {
+      batteryMah: { type: Number, default: null, min: 0 },
+      chargingTimeMin: { type: Number, default: null, min: 0 },
+      runtimeMin: { type: Number, default: null, min: 0 },
+      voltageV: { type: Number, default: null, min: 0 },
+      powerW: { type: Number, default: null, min: 0 },
+      motorSpeedRpmMin: { type: Number, default: null, min: 0 },
+      motorSpeedRpmMax: { type: Number, default: null, min: 0 },
+      speedModes: { type: Number, default: null, min: 0 },
+      waterproofRating: { type: String, default: "", trim: true, maxlength: 40 },
+      displayType: { type: String, default: "", trim: true, maxlength: 40 },
+      bladeMaterial: { type: String, default: "", trim: true, maxlength: 120 },
+      foilMaterial: { type: String, default: "", trim: true, maxlength: 120 },
+      chargingType: { type: String, default: "", trim: true, maxlength: 40 },
+      usageMode: { type: String, default: "", trim: true, maxlength: 40 },
+    },
+    packageIncludes: { type: [String], default: [] },
+    packageIncludesHe: { type: [String], default: [] },
+    packageIncludesAr: { type: [String], default: [] },
+    compatibility: {
+      replacementHeadCompatibleWith: { type: [String], default: [] },
+    },
+    publishContent: {
+      seoKeywords: { type: [String], default: [] },
+      bulletsHe: { type: [String], default: [] },
+      bulletsAr: { type: [String], default: [] },
+      shortDescHe: { type: String, default: "", trim: true, maxlength: 1000 },
+      shortDescAr: { type: String, default: "", trim: true, maxlength: 1000 },
+      batchVariationDisclaimer: {
+        type: String,
+        default:
+          "Actual product packaging and materials may contain more and/or different information. Do not solely rely on information presented here.",
+      },
+    },
+
     // Legacy single image URL (backward compatible)
     imageUrl: { type: String, default: "" },
 
@@ -389,6 +454,52 @@ productSchema.pre("validate", function productPreValidate(next) {
       });
     }
 
+    // Catalog governance rules (non-breaking, deterministic)
+    const modelStr = String(this.identity?.model || "").trim();
+    const verification = this.verification || {};
+    const isModelVerified = verification.isModelVerified === true;
+    const isCategoryVerified = verification.isCategoryVerified === true;
+    const verifiedSourcesCount = Number(verification.verifiedSourcesCount || 0);
+    const hasCriticalMismatch = verification.hasCriticalMismatch === true;
+
+    // Force HOLD when unknown model, category unverified, or critical mismatch flagged
+    if (!modelStr || !isCategoryVerified || hasCriticalMismatch) {
+      this.catalogStatus = "HOLD";
+    }
+
+    // Auto-derive confidence grade
+    if (!modelStr || hasCriticalMismatch) {
+      this.confidenceGrade = "D";
+    } else if (isModelVerified && isCategoryVerified && verifiedSourcesCount >= 2) {
+      this.confidenceGrade = "A";
+    } else if (verifiedSourcesCount >= 2) {
+      this.confidenceGrade = "B";
+    } else if (isModelVerified || isCategoryVerified || verifiedSourcesCount >= 1) {
+      this.confidenceGrade = "C";
+    } else {
+      this.confidenceGrade = "D";
+    }
+
+    // Publish gating: READY requires minimum content
+    if (this.catalogStatus === "READY") {
+      const hasTitleHe = String(this.titleHe || "").trim().length > 0;
+      const bulletsHe = Array.isArray(this.publishContent?.bulletsHe)
+        ? this.publishContent.bulletsHe
+        : [];
+      const bulletsAr = Array.isArray(this.publishContent?.bulletsAr)
+        ? this.publishContent.bulletsAr
+        : [];
+      const bulletCount = [...bulletsHe, ...bulletsAr].filter((b) => String(b || "").trim())
+        .length;
+      const hasShortDesc =
+        String(this.publishContent?.shortDescHe || "").trim().length > 0 ||
+        String(this.publishContent?.shortDescAr || "").trim().length > 0;
+
+      if (!hasTitleHe || bulletCount < 3 || !hasShortDesc) {
+        this.catalogStatus = "READY_WITH_EDITS";
+      }
+    }
+
     return next();
   };
 
@@ -456,5 +567,18 @@ productSchema.index({ salePrice: 1, price: 1, saleStartAt: 1, saleEndAt: 1 });
 // Admin listing patterns (soft-delete aware)
 productSchema.index({ isDeleted: 1, updatedAt: -1 });
 productSchema.index({ categoryId: 1, isDeleted: 1, createdAt: -1 });
+
+// Catalog governance indexes
+productSchema.index({ catalogStatus: 1, isDeleted: 1, isActive: 1, createdAt: -1 });
+productSchema.index({ confidenceGrade: 1, updatedAt: -1 });
+productSchema.index({ "verification.lastVerifiedAt": -1 });
+productSchema.index(
+  { "identity.internalSku": 1 },
+  {
+    unique: true,
+    partialFilterExpression: { "identity.internalSku": { $type: "string", $gt: "" } },
+  }
+);
+productSchema.index({ "identity.model": 1, brand: 1 });
 
 export const Product = mongoose.model("Product", productSchema);

@@ -41,12 +41,14 @@ function buildCheckoutSessionCompletedEvent(sessionId, orderId, amountMinor, pay
   };
 }
 
-function signStripeWebhook(payload, secret) {
+const TEST_WEBHOOK_SECRET = 'whsec_test_123';
+
+function signStripeWebhook(payload) {
   const Stripe = require('stripe');
   const stripe = new Stripe('sk_test_placeholder');
   return stripe.webhooks.generateTestHeaderString({
     payload: typeof payload === 'string' ? payload : JSON.stringify(payload),
-    secret: secret || process.env.STRIPE_WEBHOOK_SECRET || 'whsec_test_123',
+    secret: TEST_WEBHOOK_SECRET,
   });
 }
 
@@ -63,6 +65,7 @@ describe('Purchase flow Stripe E2E', () => {
     if (!process.env.STRIPE_SECRET_KEY) {
       process.env.STRIPE_SECRET_KEY = 'sk_test_placeholder_webhook_only';
     }
+    process.env.STRIPE_WEBHOOK_SECRET = TEST_WEBHOOK_SECRET;
     await setSiteSettings({ pricesIncludeVat: true });
 
     const user = await createUser({ role: 'user', email: `stripe_user_${Date.now()}@test.com` });
@@ -146,11 +149,13 @@ describe('Purchase flow Stripe E2E', () => {
 
     const event = buildCheckoutSessionCompletedEvent(sessionId, orderId, amountMinor);
     const payload = JSON.stringify(event);
-    const sig = signStripeWebhook(payload, process.env.STRIPE_WEBHOOK_SECRET || 'whsec_test_123');
+    // Ensure webhook secret is set right before request
+    process.env.STRIPE_WEBHOOK_SECRET = TEST_WEBHOOK_SECRET;
+    const sig = signStripeWebhook(payload);
 
     const res = await request(app)
       .post('/api/v1/stripe/webhook')
-      .set('Content-Type', 'application/json')
+      .type('application/json')
       .set('stripe-signature', sig)
       .send(payload);
 
@@ -202,10 +207,12 @@ describe('Purchase flow Stripe E2E', () => {
 
     const event = buildCheckoutSessionCompletedEvent(sessionId, orderId, amountMinor);
     const payload = JSON.stringify(event);
+    // Ensure webhook secret is set right before request
+    process.env.STRIPE_WEBHOOK_SECRET = TEST_WEBHOOK_SECRET;
     const sig = signStripeWebhook(payload);
 
-    await request(app).post('/api/v1/stripe/webhook').set('Content-Type', 'application/json').set('stripe-signature', sig).send(payload);
-    const res2 = await request(app).post('/api/v1/stripe/webhook').set('Content-Type', 'application/json').set('stripe-signature', sig).send(payload);
+    await request(app).post('/api/v1/stripe/webhook').type('application/json').set('stripe-signature', sig).send(payload);
+    const res2 = await request(app).post('/api/v1/stripe/webhook').type('application/json').set('stripe-signature', sig).send(payload);
 
     expect(res2.status).toBe(200);
     const updated = await Order.findById(orderId).lean();

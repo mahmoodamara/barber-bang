@@ -10,8 +10,14 @@ import { auditAdmin } from "../middleware/audit.js";
 import { validate } from "../middleware/validate.js";
 import { sendOk, sendCreated, sendError } from "../utils/response.js";
 import { t } from "../utils/i18n.js";
+import { invalidateHomeCache, invalidateCategoriesCache } from "../utils/cache.js";
 
 const router = express.Router();
+
+function invalidateCategoryCaches() {
+  invalidateHomeCache().catch(() => {});
+  invalidateCategoriesCache().catch(() => {});
+}
 
 router.use(requireAuth());
 router.use(requirePermission(PERMISSIONS.PRODUCTS_WRITE));
@@ -259,6 +265,7 @@ router.post("/", validate(createSchema), async (req, res) => {
       metaDescriptionAr,
     });
 
+    invalidateCategoryCaches();
     return sendCreated(res, mapCategory(item, req.lang));
   } catch (e) {
     // Handle duplicate key error
@@ -339,6 +346,7 @@ router.put("/:id", validate(updateSchema), async (req, res) => {
       throw makeErr(404, "NOT_FOUND", "Category not found");
     }
 
+    invalidateCategoryCaches();
     return sendOk(res, mapCategory(item, req.lang));
   } catch (e) {
     // Handle duplicate key error
@@ -389,6 +397,7 @@ router.delete("/:id", validate(idParamSchema), async (req, res) => {
 
     await Category.deleteOne({ _id: id });
 
+    invalidateCategoryCaches();
     return sendOk(res, { deleted: true, id: category._id });
   } catch (e) {
     return jsonErr(res, e);

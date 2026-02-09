@@ -136,6 +136,43 @@ Recovery:
 Verification:
 - Order is confirmed, invoice issued (or manual), and customer notified.
 
+### 6) Admin media upload: 401 Unauthorized
+Detection:
+- Frontend reports 401 on `POST /api/v1/admin/media/upload`.
+- Browser console or network tab shows 401 before request body is sent.
+Recovery:
+1) Ensure the upload request sends the same auth as other admin calls: `Authorization: Bearer <access_token>`.
+2) If using a separate upload client (e.g. axios instance), attach the token from auth context.
+3) Confirm token is not expired; refresh and retry if needed.
+Verification:
+- Upload request returns 201 with asset data, or a non-401 error (e.g. 413, 503).
+
+### 7) Admin media upload: Cloudinary "Invalid Signature"
+Detection:
+- API returns `CLOUDINARY_ERROR` with message like "Invalid Signature ... String to sign - 'folder=...&timestamp=...'".
+- Upload works locally but fails on deployment (e.g. Render).
+Recovery:
+1) Get the **exact** API Secret from Cloudinary Dashboard: **Settings** → **API Keys** → copy "API Secret" (not Cloud Name or API Key).
+2) In the **deployment** environment (e.g. Render → Environment), set `CLOUDINARY_API_SECRET` to that value. Ensure no leading/trailing spaces or line breaks.
+3) If the secret was rotated in Cloudinary, update it in the deployment env and redeploy.
+4) Save changes so the service redeploys and loads the new secret.
+Verification:
+- Ensure `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and `CLOUDINARY_API_SECRET` on Render all match the Cloudinary Dashboard. Upload an image via admin media; response is 201 and the asset appears in Cloudinary.
+
+Full checklist: [docs/cloudinary-invalid-signature.md](cloudinary-invalid-signature.md).
+
+### 8) Bootstrap failed: Invalid scheme (MONGO_URI)
+Detection:
+- Deploy fails on Render with "Bootstrap failed" and error: `Invalid scheme, expected connection string to start with "mongodb://" or "mongodb+srv://"`.
+- Or app throws: `MONGO_URI must start with "mongodb://" or "mongodb+srv://"...`
+Recovery:
+1) In Render Dashboard → your service → **Environment**, check `MONGO_URI`.
+2) Ensure it is set to a full connection string that **starts with** `mongodb+srv://` (Atlas) or `mongodb://` (self-hosted). No placeholder (e.g. `CHANGE_ME_MONGO_URI`), no extra quotes, no leading/trailing spaces.
+3) For MongoDB Atlas: copy the connection string from Atlas → Cluster → Connect → "Connect your application" (Node.js driver, 5.5 or later). It should look like `mongodb+srv://<user>:<password>@<cluster>.mongodb.net/<db>?retryWrites=true&w=majority`.
+4) Save environment and let Render redeploy.
+Verification:
+- Deploy completes; logs show "[db] connected" and the service stays up.
+
 ## Operational Principles
 
 - Retries are safe only when webhook.processedAt is null.

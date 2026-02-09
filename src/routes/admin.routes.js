@@ -7,6 +7,7 @@ import { requireAuth, requirePermission, PERMISSIONS } from "../middleware/auth.
 import { auditAdmin } from "../middleware/audit.js";
 import { validate } from "../middleware/validate.js";
 import { sendOk, sendCreated, sendError } from "../utils/response.js";
+import { invalidateHomeCache } from "../utils/cache.js";
 
 import { DeliveryArea } from "../models/DeliveryArea.js";
 import { PickupPoint } from "../models/PickupPoint.js";
@@ -916,6 +917,7 @@ router.post(
       isActive: b.isActive ?? true,
     });
 
+    invalidateHomeCache().catch(() => {});
     return sendCreated(res, item);
   })
 );
@@ -932,6 +934,7 @@ const updateOfferHandler = asyncHandler(async (req, res) => {
   const item = await Offer.findByIdAndUpdate(id, patch, { new: true, runValidators: true });
   if (!item) return safeNotFound(res, "NOT_FOUND", "Offer not found");
 
+  invalidateHomeCache().catch(() => {});
   return sendOk(res, item);
 });
 
@@ -960,6 +963,7 @@ router.delete(
     const id = String(req.params.id);
     const item = await Offer.findByIdAndDelete(id);
     if (!item) return safeNotFound(res, "NOT_FOUND", "Offer not found");
+    invalidateHomeCache().catch(() => {});
     return sendOk(res, { deleted: true });
   })
 );

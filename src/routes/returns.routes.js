@@ -11,9 +11,16 @@ import { ReturnRequest } from "../models/ReturnRequest.js";
 
 import { evaluateReturnEligibility } from "../utils/returns.policy.js";
 import { getRequestId } from "../middleware/error.js";
+import { setPrivateNoStore } from "../utils/response.js";
 
 const router = express.Router();
 router.use(requireAuth());
+
+// ✅ Performance: Returns responses are always private/personalized
+router.use((req, res, next) => {
+  setPrivateNoStore(res);
+  next();
+});
 
 /* =========================
    Helpers

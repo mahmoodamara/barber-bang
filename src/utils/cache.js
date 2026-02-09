@@ -196,6 +196,33 @@ const rankingCache = new MemoryCache({
   maxSize: 500,
 });
 
+// ✅ Performance: Request coalescing to prevent thundering herd
+// When multiple identical requests arrive concurrently, only one fetcher runs
+const inflightRequests = new Map();
+
+/**
+ * Coalesce identical concurrent requests by cache key.
+ * @param {string} key - Cache key
+ * @param {Function} fetcher - Async function to fetch data
+ * @returns {Promise<any>}
+ */
+async function coalesceRequest(key, fetcher) {
+  if (inflightRequests.has(key)) {
+    return inflightRequests.get(key);
+  }
+
+  const promise = (async () => {
+    try {
+      return await fetcher();
+    } finally {
+      inflightRequests.delete(key);
+    }
+  })();
+
+  inflightRequests.set(key, promise);
+  return promise;
+}
+
 /**
  * Get cached value (Redis when available, otherwise memory).
  * @param {string} key
@@ -275,7 +302,8 @@ export async function cacheDelete(key) {
 }
 
 /**
- * Cache wrapper with stale-while-revalidate support.
+ * Cache wrapper with stale-while-revalidate support + request coalescing.
+ * ✅ Performance: Prevents thundering herd via coalescing.
  * @param {string} key - Cache key
  * @param {Function} fetcher - Async function to fetch data if not cached
  * @param {object} options - Cache options
@@ -288,12 +316,12 @@ export async function withCache(key, fetcher, { ttlMs = 60_000, staleMs = null }
     return { data: cached.value, fromCache: true, stale: false };
   }
 
-  // If stale, return stale data but trigger background refresh
+  // If stale, return stale data but trigger background refresh (with coalescing)
   if (cached && cached.stale) {
-    // Fire-and-forget refresh
+    // Fire-and-forget refresh (coalesced)
     setImmediate(async () => {
       try {
-        const fresh = await fetcher();
+        const fresh = await coalesceRequest(`refresh:${key}`, fetcher);
         await cacheSet(key, fresh, ttlMs, staleMs);
       } catch (err) {
         console.warn(`[cache] Background refresh failed for ${key}:`, err?.message);
@@ -303,8 +331,8 @@ export async function withCache(key, fetcher, { ttlMs = 60_000, staleMs = null }
     return { data: cached.value, fromCache: true, stale: true };
   }
 
-  // No cache, fetch fresh
-  const data = await fetcher();
+  // No cache, fetch fresh (with coalescing to prevent thundering herd)
+  const data = await coalesceRequest(key, fetcher);
   await cacheSet(key, data, ttlMs, staleMs);
 
   return { data, fromCache: false, stale: false };
@@ -315,7 +343,52 @@ export async function withCache(key, fetcher, { ttlMs = 60_000, staleMs = null }
  * @param {string} prefix - Cache key prefix (e.g., "ranking:best-sellers")
  */
 export function invalidateRankingCache(prefix = "ranking") {
+  return Promise.resolve(rankingCache.deleteByPrefix(prefix));
+}
+
+/**
+ * Delete all cache keys with the given prefix (Redis or memory).
+ * @param {string} prefix - Key prefix (e.g., "home")
+ * @returns {Promise<number>} - Number of keys deleted
+ */
+export async function cacheDeleteByPrefix(prefix) {
+  if (!prefix) return 0;
+  const client = await getRedisClient();
+  if (client) {
+    try {
+      const keys = await client.keys(`${prefix}*`);
+      if (keys.length > 0) await client.del(keys);
+      return keys.length;
+    } catch (err) {
+      console.warn("[cache] Redis deleteByPrefix failed:", String(err?.message || err));
+    }
+  }
   return rankingCache.deleteByPrefix(prefix);
+}
+
+/**
+ * Build home API cache key (by lang).
+ * @param {string} lang
+ * @returns {string}
+ */
+export function buildHomeCacheKey(lang = "he") {
+  return `home:${String(lang || "he")}`;
+}
+
+/**
+ * Invalidate home API cache (call after admin product/category/offer update).
+ * @returns {Promise<number>}
+ */
+export async function invalidateHomeCache() {
+  return cacheDeleteByPrefix("home");
+}
+
+/**
+ * Invalidate categories API cache (call after admin category update).
+ * @returns {Promise<number>}
+ */
+export async function invalidateCategoriesCache() {
+  return cacheDeleteByPrefix("categories");
 }
 
 /**

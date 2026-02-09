@@ -6,6 +6,7 @@ import mongoose from "mongoose";
 import { Product } from "../models/Product.js";
 import { ProductAttribute } from "../models/ProductAttribute.js";
 import { Category } from "../models/Category.js";
+import { generateCatalogQaReport } from "../services/catalogQa.service.js";
 import {
   toMinorSafe,
   normalizeKey,
@@ -21,8 +22,17 @@ import { validate } from "../middleware/validate.js";
 import { getRequestId } from "../middleware/error.js";
 import { t } from "../utils/i18n.js";
 import { sendOk, sendCreated, sendError } from "../utils/response.js";
+import { invalidateHomeCache, invalidateRankingCache } from "../utils/cache.js";
 
 const router = express.Router();
+const DEFAULT_BATCH_DISCLAIMER =
+  "Actual product packaging and materials may contain more and/or different information. Do not solely rely on information presented here.";
+
+/** Invalidate home and ranking caches after product mutations (fire-and-forget) */
+function invalidateProductCaches() {
+  invalidateHomeCache().catch(() => {});
+  invalidateRankingCache().catch(() => {});
+}
 
 // Auth + Role: admin or staff with PRODUCTS_WRITE permission
 router.use(requireAuth());
@@ -254,6 +264,64 @@ function mapProductAdmin(p, lang) {
     importerName: obj.importerName || "",
     countryOfOrigin: obj.countryOfOrigin || "",
     warrantyInfo: obj.warrantyInfo || "",
+    catalogStatus: obj.catalogStatus || "HOLD",
+    confidenceGrade: obj.confidenceGrade || "D",
+    verification: {
+      isModelVerified: Boolean(obj.verification?.isModelVerified),
+      isCategoryVerified: Boolean(obj.verification?.isCategoryVerified),
+      verifiedSourcesCount: Number(obj.verification?.verifiedSourcesCount || 0),
+      lastVerifiedAt: obj.verification?.lastVerifiedAt || null,
+      notes: obj.verification?.notes || "",
+      notesHe: obj.verification?.notesHe || "",
+      notesAr: obj.verification?.notesAr || "",
+      hasCriticalMismatch: Boolean(obj.verification?.hasCriticalMismatch),
+    },
+    identity: {
+      internalSku: obj.identity?.internalSku || "",
+      model: obj.identity?.model || "",
+      productLine: obj.identity?.productLine || "",
+    },
+    classification: {
+      categoryPrimary: obj.classification?.categoryPrimary || "",
+      categorySecondary: obj.classification?.categorySecondary || "",
+    },
+    specs: {
+      batteryMah: obj.specs?.batteryMah ?? null,
+      chargingTimeMin: obj.specs?.chargingTimeMin ?? null,
+      runtimeMin: obj.specs?.runtimeMin ?? null,
+      voltageV: obj.specs?.voltageV ?? null,
+      powerW: obj.specs?.powerW ?? null,
+      motorSpeedRpmMin: obj.specs?.motorSpeedRpmMin ?? null,
+      motorSpeedRpmMax: obj.specs?.motorSpeedRpmMax ?? null,
+      speedModes: obj.specs?.speedModes ?? null,
+      waterproofRating: obj.specs?.waterproofRating || "",
+      displayType: obj.specs?.displayType || "",
+      bladeMaterial: obj.specs?.bladeMaterial || "",
+      foilMaterial: obj.specs?.foilMaterial || "",
+      chargingType: obj.specs?.chargingType || "",
+      usageMode: obj.specs?.usageMode || "",
+    },
+    packageIncludes: Array.isArray(obj.packageIncludes) ? obj.packageIncludes : [],
+    packageIncludesHe: Array.isArray(obj.packageIncludesHe) ? obj.packageIncludesHe : [],
+    packageIncludesAr: Array.isArray(obj.packageIncludesAr) ? obj.packageIncludesAr : [],
+    compatibility: {
+      replacementHeadCompatibleWith: Array.isArray(
+        obj.compatibility?.replacementHeadCompatibleWith
+      )
+        ? obj.compatibility.replacementHeadCompatibleWith
+        : [],
+    },
+    publishContent: {
+      seoKeywords: Array.isArray(obj.publishContent?.seoKeywords)
+        ? obj.publishContent.seoKeywords
+        : [],
+      bulletsHe: Array.isArray(obj.publishContent?.bulletsHe) ? obj.publishContent.bulletsHe : [],
+      bulletsAr: Array.isArray(obj.publishContent?.bulletsAr) ? obj.publishContent.bulletsAr : [],
+      shortDescHe: obj.publishContent?.shortDescHe || "",
+      shortDescAr: obj.publishContent?.shortDescAr || "",
+      batchVariationDisclaimer:
+        obj.publishContent?.batchVariationDisclaimer || DEFAULT_BATCH_DISCLAIMER,
+    },
     variants: Array.isArray(obj.variants) ? obj.variants.map(mapVariant) : [],
     sale: onSale
       ? {
@@ -307,6 +375,17 @@ const ALLOWED_PATCH_FIELDS = new Set([
   "importerName",
   "countryOfOrigin",
   "warrantyInfo",
+  "catalogStatus",
+  "confidenceGrade",
+  "verification",
+  "identity",
+  "classification",
+  "specs",
+  "packageIncludes",
+  "packageIncludesHe",
+  "packageIncludesAr",
+  "compatibility",
+  "publishContent",
 ]);
 
 // Computed fields that must NEVER be updated directly
@@ -368,6 +447,73 @@ const variantSchema = z.object({
   skinType: z.string().max(80).optional(),
 });
 
+const catalogStatusSchema = z.enum(["READY", "READY_WITH_EDITS", "HOLD"]);
+const confidenceGradeSchema = z.enum(["A", "B", "C", "D"]);
+
+const verificationSchema = z
+  .object({
+    isModelVerified: z.boolean().optional(),
+    isCategoryVerified: z.boolean().optional(),
+    verifiedSourcesCount: z.number().int().min(0).optional(),
+    lastVerifiedAt: z.string().datetime().nullable().optional(),
+    notes: z.string().max(4000).optional(),
+    notesHe: z.string().max(4000).optional(),
+    notesAr: z.string().max(4000).optional(),
+    hasCriticalMismatch: z.boolean().optional(),
+  })
+  .optional();
+
+const identitySchema = z
+  .object({
+    internalSku: z.string().max(80).optional(),
+    model: z.string().max(120).optional(),
+    productLine: z.string().max(120).optional(),
+  })
+  .optional();
+
+const classificationSchema = z
+  .object({
+    categoryPrimary: z.string().max(120).optional(),
+    categorySecondary: z.string().max(120).optional(),
+  })
+  .optional();
+
+const specsSchema = z
+  .object({
+    batteryMah: z.number().min(0).nullable().optional(),
+    chargingTimeMin: z.number().min(0).nullable().optional(),
+    runtimeMin: z.number().min(0).nullable().optional(),
+    voltageV: z.number().min(0).nullable().optional(),
+    powerW: z.number().min(0).nullable().optional(),
+    motorSpeedRpmMin: z.number().min(0).nullable().optional(),
+    motorSpeedRpmMax: z.number().min(0).nullable().optional(),
+    speedModes: z.number().min(0).nullable().optional(),
+    waterproofRating: z.string().max(40).optional(),
+    displayType: z.string().max(40).optional(),
+    bladeMaterial: z.string().max(120).optional(),
+    foilMaterial: z.string().max(120).optional(),
+    chargingType: z.string().max(40).optional(),
+    usageMode: z.string().max(40).optional(),
+  })
+  .optional();
+
+const compatibilitySchema = z
+  .object({
+    replacementHeadCompatibleWith: z.array(z.string().max(120)).max(50).optional(),
+  })
+  .optional();
+
+const publishContentSchema = z
+  .object({
+    seoKeywords: z.array(z.string().max(80)).max(50).optional(),
+    bulletsHe: z.array(z.string().max(200)).max(50).optional(),
+    bulletsAr: z.array(z.string().max(200)).max(50).optional(),
+    shortDescHe: z.string().max(1000).optional(),
+    shortDescAr: z.string().max(1000).optional(),
+    batchVariationDisclaimer: z.string().max(1000).optional(),
+  })
+  .optional();
+
 const listQuerySchema = z.object({
   query: z
     .object({
@@ -376,6 +522,10 @@ const listQuerySchema = z.object({
       isActive: z.enum(["true", "false"]).optional(),
       isDeleted: z.enum(["true", "false"]).optional(),
       hasVariants: z.enum(["true", "false"]).optional(),
+      catalogStatus: catalogStatusSchema.optional(),
+      confidenceGrade: confidenceGradeSchema.optional(),
+      unverifiedOnly: z.enum(["true", "false"]).optional(),
+      categoryMismatchOnly: z.enum(["true", "false"]).optional(),
       page: z.string().regex(/^\d+$/).optional(),
       limit: z.string().regex(/^\d+$/).optional(),
       sortBy: z.enum(["createdAt", "updatedAt", "price", "stock", "title"]).optional(),
@@ -415,6 +565,17 @@ const createBodySchema = z
     importerName: z.string().max(160).optional(),
     countryOfOrigin: z.string().max(120).optional(),
     warrantyInfo: z.string().max(400).optional(),
+    catalogStatus: catalogStatusSchema.optional(),
+    confidenceGrade: confidenceGradeSchema.optional(),
+    verification: verificationSchema,
+    identity: identitySchema,
+    classification: classificationSchema,
+    specs: specsSchema,
+    packageIncludes: z.array(z.string().max(200)).max(50).optional(),
+    packageIncludesHe: z.array(z.string().max(200)).max(50).optional(),
+    packageIncludesAr: z.array(z.string().max(200)).max(50).optional(),
+    compatibility: compatibilitySchema,
+    publishContent: publishContentSchema,
     variants: z.array(variantSchema).optional(),
   })
   .strict()
@@ -467,6 +628,17 @@ const patchBodySchema = z
     importerName: z.string().max(160).optional(),
     countryOfOrigin: z.string().max(120).optional(),
     warrantyInfo: z.string().max(400).optional(),
+    catalogStatus: catalogStatusSchema.optional(),
+    confidenceGrade: confidenceGradeSchema.optional(),
+    verification: verificationSchema,
+    identity: identitySchema,
+    classification: classificationSchema,
+    specs: specsSchema,
+    packageIncludes: z.array(z.string().max(200)).max(50).optional(),
+    packageIncludesHe: z.array(z.string().max(200)).max(50).optional(),
+    packageIncludesAr: z.array(z.string().max(200)).max(50).optional(),
+    compatibility: compatibilitySchema,
+    publishContent: publishContentSchema,
   })
   .strict()
   .superRefine((b, ctx) => {
@@ -524,6 +696,10 @@ const imagesUpdateSchema = z.object({
     .strict(),
 });
 
+const productIdParamSchema = z.object({
+  params: z.object({ id: z.string().min(1) }),
+});
+
 /* ============================
    GET /api/admin/products
 ============================ */
@@ -565,6 +741,29 @@ router.get("/", validate(listQuerySchema), async (req, res) => {
       filter["variants.0"] = { $exists: true };
     } else if (q.hasVariants === "false") {
       filter["variants.0"] = { $exists: false };
+    }
+
+    if (q.catalogStatus) {
+      filter.catalogStatus = q.catalogStatus;
+    }
+
+    if (q.confidenceGrade) {
+      filter.confidenceGrade = q.confidenceGrade;
+    }
+
+    if (q.unverifiedOnly === "true") {
+      filter.$or = [
+        { "verification.isModelVerified": { $ne: true } },
+        { "verification.isCategoryVerified": { $ne: true } },
+      ];
+    }
+
+    if (q.categoryMismatchOnly === "true") {
+      filter.$and = [
+        ...(filter.$and || []),
+        { "verification.isCategoryVerified": false },
+        { "classification.categoryPrimary": { $type: "string", $ne: "" } },
+      ];
     }
 
     // Track if we're using $text search for sorting decisions
@@ -653,6 +852,55 @@ router.get("/:id", async (req, res) => {
 });
 
 /* ============================
+   POST /api/admin/products/:id/recompute-catalog-status
+============================ */
+
+router.post(
+  "/:id/recompute-catalog-status",
+  validate(productIdParamSchema),
+  async (req, res) => {
+    try {
+      const id = String(req.params.id || "");
+      if (!isValidObjectId(id)) {
+        return safeNotFound(res, "NOT_FOUND", "Product not found");
+      }
+
+      const product = await Product.findById(id);
+      if (!product) {
+        return safeNotFound(res, "NOT_FOUND", "Product not found");
+      }
+
+      await product.save();
+      invalidateProductCaches();
+      return jsonRes(res, mapProductAdmin(product, req.lang));
+    } catch (e) {
+      return jsonErr(res, e);
+    }
+  }
+);
+
+/* ============================
+   GET /api/admin/products/:id/qa-report
+============================ */
+
+router.get("/:id/qa-report", validate(productIdParamSchema), async (req, res) => {
+  try {
+    const id = String(req.params.id || "");
+    if (!isValidObjectId(id)) {
+      return safeNotFound(res, "NOT_FOUND", "Product not found");
+    }
+
+    const report = await generateCatalogQaReport(id);
+    return jsonRes(res, report);
+  } catch (e) {
+    if (e?.code === "NOT_FOUND") {
+      return safeNotFound(res, "NOT_FOUND", "Product not found");
+    }
+    return jsonErr(res, e);
+  }
+});
+
+/* ============================
    POST /api/admin/products
 ============================ */
 
@@ -674,6 +922,23 @@ router.post(
           }))
         )
         : [];
+
+      const verification =
+        b.verification && typeof b.verification === "object"
+          ? {
+              ...b.verification,
+              lastVerifiedAt: b.verification.lastVerifiedAt
+                ? new Date(b.verification.lastVerifiedAt)
+                : null,
+            }
+          : undefined;
+
+      const modelStr = String(b.identity?.model || "").trim();
+      const isCategoryVerified = b.verification?.isCategoryVerified === true;
+      const hasCriticalMismatch = b.verification?.hasCriticalMismatch === true;
+      if (b.isActive === true && (!modelStr || !isCategoryVerified || hasCriticalMismatch)) {
+        throw makeErr(400, "PUBLISH_BLOCKED", "Cannot activate product with catalogStatus HOLD");
+      }
 
       const item = await Product.create({
         titleHe: b.titleHe || b.title || "",
@@ -708,9 +973,21 @@ router.post(
         importerName: b.importerName || "",
         countryOfOrigin: b.countryOfOrigin || "",
         warrantyInfo: b.warrantyInfo || "",
+        catalogStatus: b.catalogStatus,
+        confidenceGrade: b.confidenceGrade,
+        verification,
+        identity: b.identity,
+        classification: b.classification,
+        specs: b.specs,
+        packageIncludes: Array.isArray(b.packageIncludes) ? b.packageIncludes : [],
+        packageIncludesHe: Array.isArray(b.packageIncludesHe) ? b.packageIncludesHe : [],
+        packageIncludesAr: Array.isArray(b.packageIncludesAr) ? b.packageIncludesAr : [],
+        compatibility: b.compatibility,
+        publishContent: b.publishContent,
         variants,
       });
 
+      invalidateProductCaches();
       return sendCreated(res, mapProductAdmin(item, req.lang));
     } catch (e) {
       return jsonErr(res, e);
@@ -757,6 +1034,14 @@ router.patch(
         patch.saleEndAt = patch.saleEndAt ? new Date(patch.saleEndAt) : null;
       }
 
+      if (patch.verification && typeof patch.verification === "object") {
+        if ("lastVerifiedAt" in patch.verification) {
+          patch.verification.lastVerifiedAt = patch.verification.lastVerifiedAt
+            ? new Date(patch.verification.lastVerifiedAt)
+            : null;
+        }
+      }
+
       // priceMinor / salePriceMinor are computed only by Product model pre-validate hooks
 
       // Validate salePrice against existing price if only salePrice is provided
@@ -772,8 +1057,13 @@ router.patch(
 
       // Apply allowed fields using doc.set() to trigger model validators
       product.set(patch);
+
+      if (patch.isActive === true && product.catalogStatus === "HOLD") {
+        throw makeErr(400, "PUBLISH_BLOCKED", "Cannot activate product with catalogStatus HOLD");
+      }
       await product.save();
 
+      invalidateProductCaches();
       return jsonRes(res, mapProductAdmin(product, req.lang));
     } catch (e) {
       return jsonErr(res, e);
@@ -809,6 +1099,7 @@ router.delete("/:id", async (req, res) => {
     });
     await product.save();
 
+    invalidateProductCaches();
     return jsonRes(res, { deleted: true, id: product._id });
   } catch (e) {
     return jsonErr(res, e);
@@ -843,6 +1134,7 @@ router.post("/:id/restore", async (req, res) => {
     });
     await product.save();
 
+    invalidateProductCaches();
     return jsonRes(res, mapProductAdmin(product, req.lang));
   } catch (e) {
     return jsonErr(res, e);
@@ -884,6 +1176,7 @@ router.post("/:id/stock-adjust", validate(stockAdjustSchema), async (req, res) =
       variant.stock = newStock;
       await product.save();
 
+      invalidateProductCaches();
       return jsonRes(res, {
         productId: product._id,
         variantId: variant._id,
@@ -903,6 +1196,7 @@ router.post("/:id/stock-adjust", validate(stockAdjustSchema), async (req, res) =
       product.stock = newStock;
       await product.save();
 
+      invalidateProductCaches();
       return jsonRes(res, {
         productId: product._id,
         previousStock,
@@ -944,6 +1238,7 @@ router.put("/:id/variants", validate(variantsReplaceSchema), async (req, res) =>
     product.variants = validatedVariants;
     await product.save();
 
+    invalidateProductCaches();
     return jsonRes(res, mapProductAdmin(product, req.lang));
   } catch (e) {
     return jsonErr(res, e);
@@ -1019,6 +1314,7 @@ router.patch("/:id/images", validate(imagesUpdateSchema), async (req, res) => {
 
     await product.save();
 
+    invalidateProductCaches();
     return jsonRes(res, mapProductAdmin(product, req.lang));
   } catch (e) {
     return jsonErr(res, e);

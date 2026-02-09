@@ -14,8 +14,15 @@ import { releaseCouponReservation } from "../services/pricing.service.js";
 import { calcCancellationFee } from "../utils/returns.policy.js";
 import { mapOrder } from "../utils/mapOrder.js";
 import { getRequestId } from "../middleware/error.js";
+import { setPrivateNoStore } from "../utils/response.js";
 
 const router = express.Router();
+
+// ✅ Performance: Orders responses are always private/personalized
+router.use((req, res, next) => {
+  setPrivateNoStore(res);
+  next();
+});
 
 /* -------------------------------- Helpers -------------------------------- */
 

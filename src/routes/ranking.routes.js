@@ -6,7 +6,7 @@ import express from "express";
 
 import { validate } from "../middleware/validate.js";
 import { createLimiter } from "../middleware/rateLimit.js";
-import { sendOk, sendError } from "../utils/response.js";
+import { sendOk, sendError, setCacheHeaders } from "../utils/response.js";
 import { mapRankingProductCard, mapProductListItem } from "../utils/mapProduct.js";
 import { withCache, buildRankingCacheKey } from "../utils/cache.js";
 
@@ -73,6 +73,11 @@ router.get(
       const mappedItems = result.items.map((p) => mapRankingProductCard(p, { lang, now }));
       const pages = result.pages || Math.ceil(result.total / result.limit);
 
+      setCacheHeaders(res, {
+        sMaxAge: 60,
+        staleWhileRevalidate: 120,
+        vary: "Accept-Language",
+      });
       return sendOk(
         res,
         { items: mappedItems },
@@ -119,6 +124,11 @@ router.get(
       const mappedItems = result.items.map((p) => mapRankingProductCard(p, { lang, now }));
       const pages = result.pages || Math.ceil(result.total / result.limit);
 
+      setCacheHeaders(res, {
+        sMaxAge: 60,
+        staleWhileRevalidate: 120,
+        vary: "Accept-Language",
+      });
       return sendOk(
         res,
         { items: mappedItems },
@@ -165,6 +175,11 @@ router.get(
       const mappedItems = result.items.map((p) => mapRankingProductCard(p, { lang, now }));
       const pages = result.pages || Math.ceil(result.total / result.limit);
 
+      setCacheHeaders(res, {
+        sMaxAge: 60,
+        staleWhileRevalidate: 120,
+        vary: "Accept-Language",
+      });
       return sendOk(
         res,
         { items: mappedItems },
@@ -211,6 +226,11 @@ router.get(
       const mappedItems = result.items.map((p) => mapProductListItem(p, { lang, now }));
       const pages = result.pages || Math.ceil(result.total / result.limit);
 
+      setCacheHeaders(res, {
+        sMaxAge: 60,
+        staleWhileRevalidate: 120,
+        vary: "Accept-Language",
+      });
       return sendOk(
         res,
         { items: mappedItems },
@@ -257,6 +277,11 @@ router.get(
       const mappedItems = result.items.map((p) => mapProductListItem(p, { lang, now }));
       const pages = result.pages || Math.ceil(result.total / result.limit);
 
+      setCacheHeaders(res, {
+        sMaxAge: 60,
+        staleWhileRevalidate: 120,
+        vary: "Accept-Language",
+      });
       return sendOk(
         res,
         { items: mappedItems },

@@ -19,7 +19,7 @@ import { requireAuth, requireRole } from "../middleware/auth.js";
 import { validate } from "../middleware/validate.js";
 import { t } from "../utils/i18n.js";
 import { sanitizePlainText } from "../utils/sanitize.js";
-import { sendOk, sendCreated, sendError } from "../utils/response.js";
+import { sendOk, sendCreated, sendError, setCacheHeaders } from "../utils/response.js";
 import { recordProductEngagement, recalculateProductRatingStats } from "../services/ranking.service.js";
 
 const router = express.Router();
@@ -404,6 +404,11 @@ router.get("/", async (req, res) => {
     const mapped = items.map((p) => mapProductListItem(p, req.lang, now));
     const pages = Math.ceil(total / limit);
 
+    setCacheHeaders(res, {
+      sMaxAge: 30,
+      staleWhileRevalidate: 60,
+      vary: "Accept-Language",
+    });
     return sendOk(
       res,
       { items: mapped },
@@ -459,6 +464,11 @@ router.get("/:slugOrId", async (req, res, next) => {
       now: new Date(),
     }).catch(() => {});
 
+    setCacheHeaders(res, {
+      sMaxAge: 30,
+      staleWhileRevalidate: 60,
+      vary: "Accept-Language",
+    });
     return sendOk(res, mapProductDetailsDoc(item, req.lang));
   } catch (e) {
     return jsonErr(res, e);

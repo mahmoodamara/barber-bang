@@ -206,7 +206,7 @@ if (isProd) {
  * CORS_ORIGIN="https://site.com,http://localhost:5173"
  * In production, if CORS_ORIGIN is empty, defaults to frontend URL below.
  */
-const DEFAULT_FRONTEND_ORIGIN = "https://barber-bang.netlify.app";
+const DEFAULT_FRONTEND_ORIGIN = "http://localhost:8080";
 const corsOriginEnv = String(process.env.CORS_ORIGIN || "").trim();
 let corsOriginList = corsOriginEnv
   .split(",")
@@ -229,7 +229,7 @@ const localhostOrigins = new Set([
 ]);
 
 // Production frontend origins (always allowed)
-const productionOrigins = new Set(["http://localhost:8080"]);
+const productionOrigins = new Set(["http://localhost:8080", "https://barber-bang.netlify.app"]);
 
 const allowedOrigins = new Set(corsOriginList);
 // Always allow production frontend origins

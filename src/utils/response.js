@@ -4,6 +4,38 @@
 import { getRequestId } from "../middleware/error.js";
 
 /**
+ * Set Cache-Control and optional Vary for API responses (CDN + browser).
+ * @param {object} res - Express response
+ * @param {object} options
+ * @param {number} [options.sMaxAge] - s-maxage in seconds (CDN)
+ * @param {number} [options.staleWhileRevalidate] - stale-while-revalidate in seconds
+ * @param {string} [options.vary] - Vary header value (e.g. "Accept-Language")
+ */
+export function setCacheHeaders(res, { sMaxAge, staleWhileRevalidate, vary } = {}) {
+  if (sMaxAge != null && Number.isFinite(sMaxAge)) {
+    const parts = ["public", `s-maxage=${sMaxAge}`];
+    if (staleWhileRevalidate != null && Number.isFinite(staleWhileRevalidate)) {
+      parts.push(`stale-while-revalidate=${staleWhileRevalidate}`);
+    }
+    res.setHeader("Cache-Control", parts.join(", "));
+  }
+  if (vary && typeof vary === "string") {
+    res.setHeader("Vary", vary);
+  }
+}
+
+/**
+ * ✅ Performance: Set strict no-store for private/personalized endpoints.
+ * Use for: cart, auth, checkout, orders, account, wishlist, returns.
+ * @param {object} res - Express response
+ */
+export function setPrivateNoStore(res) {
+  res.setHeader("Cache-Control", "private, no-store, no-cache, must-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+}
+
+/**
  * Send a success response with normalized envelope.
  * Returns both `ok: true` AND `success: true` for frontend compatibility.
  * { ok: true, success: true, data, meta? }

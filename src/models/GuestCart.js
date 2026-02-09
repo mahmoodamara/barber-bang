@@ -37,5 +37,6 @@ const guestCartSchema = new mongoose.Schema(
 // TTL index: expire guest carts after 30 days of inactivity
 guestCartSchema.index({ updatedAt: 1 }, { expireAfterSeconds: 30 * 24 * 60 * 60 });
 guestCartSchema.index({ cartId: 1 });
+// cartId already has unique index via { unique: true } on the field
 
 export const GuestCart = mongoose.model("GuestCart", guestCartSchema);

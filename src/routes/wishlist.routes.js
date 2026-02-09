@@ -10,8 +10,15 @@ import { Product } from "../models/Product.js";
 import { mapProductListItem } from "../utils/mapProduct.js";
 import { getRequestId } from "../middleware/error.js";
 import { recordProductEngagement } from "../services/ranking.service.js";
+import { setPrivateNoStore } from "../utils/response.js";
 
 const router = express.Router();
+
+// ✅ Performance: Wishlist responses are always private/personalized
+router.use((req, res, next) => {
+  setPrivateNoStore(res);
+  next();
+});
 
 function errorPayload(req, code, message) {
   return {

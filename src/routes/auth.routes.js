@@ -12,8 +12,15 @@ import { PasswordResetToken } from "../models/PasswordResetToken.js";
 import { EmailVerificationToken } from "../models/EmailVerificationToken.js";
 import { signToken, signRefreshToken, verifyToken } from "../utils/jwt.js";
 import { mergeGuestCartIntoUser } from "../services/guestCart.service.js";
+import { setPrivateNoStore } from "../utils/response.js";
 
 const router = express.Router();
+
+// ✅ Performance: Auth responses are always private/personalized
+router.use((req, res, next) => {
+  setPrivateNoStore(res);
+  next();
+});
 
 function normalizeEmail(email) {
   return String(email || "").toLowerCase().trim();

@@ -31,8 +31,15 @@ import {
 import { getRequestId } from "../middleware/error.js";
 import { getCheckoutFailureCounter } from "../middleware/prometheus.js";
 import { onCheckoutFailure } from "../utils/alertHooks.js";
+import { setPrivateNoStore } from "../utils/response.js";
 
 const router = express.Router();
+
+// ✅ Performance: Checkout responses are always private/personalized
+router.use((req, res, next) => {
+  setPrivateNoStore(res);
+  next();
+});
 
 /* ============================
    Zod Schemas
