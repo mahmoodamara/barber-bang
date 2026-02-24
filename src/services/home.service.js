@@ -3,6 +3,7 @@
 import { Product } from "../models/Product.js";
 import { Category } from "../models/Category.js";
 import { Offer } from "../models/Offer.js";
+import { HomeLayout } from "../models/HomeLayout.js";
 import { t } from "../utils/i18n.js";
 import {
   getFeaturedProducts,
@@ -128,6 +129,38 @@ function mapOffer(o, lang) {
   };
 }
 
+function normalizeText(value) {
+  if (typeof value !== "string") return "";
+  return value.trim();
+}
+
+function pickHeroSectionPayload(layoutDoc) {
+  const sections = Array.isArray(layoutDoc?.sections) ? layoutDoc.sections : [];
+
+  const heroSection = sections
+    .filter((section) => section?.type === "hero" && section?.enabled !== false)
+    .sort((a, b) => Number(a?.order || 0) - Number(b?.order || 0))[0];
+
+  const payload = heroSection?.payload;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+
+  const hero = {
+    titleHe: normalizeText(payload.titleHe),
+    titleAr: normalizeText(payload.titleAr),
+    subtitleHe: normalizeText(payload.subtitleHe),
+    subtitleAr: normalizeText(payload.subtitleAr),
+    ctaTextHe: normalizeText(payload.ctaTextHe),
+    ctaTextAr: normalizeText(payload.ctaTextAr),
+    ctaLink: normalizeText(payload.ctaLink),
+    imageUrl: normalizeText(payload.imageUrl),
+    videoUrl: normalizeText(payload.videoUrl),
+    videoPosterUrl: normalizeText(payload.videoPosterUrl || payload.posterUrl || payload.imageUrl),
+  };
+
+  const hasAnyContent = Object.values(hero).some(Boolean);
+  return hasAnyContent ? hero : null;
+}
+
 /**
  * Only show "available enough" products:
  * - No variants → stock > 0
@@ -164,6 +197,7 @@ export async function getHomeData(lang) {
     rankedBestSellers,
     onSaleProducts,
     activeOffers,
+    homeLayout,
   ] = await Promise.all([
     // ✅ categories
     Category.find({})
@@ -221,6 +255,8 @@ export async function getHomeData(lang) {
       .limit(20)
       .select(offerSelect)
       .lean(),
+
+    HomeLayout.findOne().select("sections").lean(),
   ]);
 
   // ✅ Extract ranked items safely
@@ -245,6 +281,7 @@ export async function getHomeData(lang) {
   const finalFeatured = featuredItems.length ? featuredItems : fallbackNewest;
   const finalNewArrivals = newItems.length ? newItems : fallbackNewest;
   const finalBestSellers = bestItems.length ? bestItems : fallbackNewest;
+  const hero = pickHeroSectionPayload(homeLayout);
 
   return {
     categories: (categories || []).map((c) => mapCategory(c, lang)),
@@ -258,6 +295,7 @@ export async function getHomeData(lang) {
     onSale: (onSaleProducts || []).map((p) => mapProduct(p, lang, now)),
 
     activeOffers: (activeOffers || []).map((o) => mapOffer(o, lang)),
+    hero,
   };
 }
 

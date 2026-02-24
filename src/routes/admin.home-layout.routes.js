@@ -4,6 +4,7 @@ import { HomeLayout } from "../models/HomeLayout.js";
 import { requireAuth, requirePermission, PERMISSIONS } from "../middleware/auth.js";
 import { auditAdmin } from "../middleware/audit.js";
 import { sendOk, sendError } from "../utils/response.js";
+import { invalidateHomeCache } from "../utils/cache.js";
 
 const router = express.Router();
 
@@ -67,6 +68,7 @@ router.put("/", async (req, res, next) => {
         layout.sections = sections;
 
         await layout.save();
+        invalidateHomeCache();
 
         sendOk(res, layout);
     } catch (error) {
