@@ -17,7 +17,7 @@ const cartVariantSnapshotSchema = new mongoose.Schema(
             valueKey: { type: String, default: "" },
             unit: { type: String, default: "" },
           },
-          { _id: false }
+          { _id: false },
         ),
       ],
       default: [],
@@ -32,7 +32,7 @@ const cartVariantSnapshotSchema = new mongoose.Schema(
       skinType: { type: String, default: "" },
     },
   },
-  { _id: false }
+  { _id: false },
 );
 
 const cartItemSchema = new mongoose.Schema(
@@ -53,8 +53,20 @@ const cartItemSchema = new mongoose.Schema(
 
 const userSchema = new mongoose.Schema(
   {
-    name: { type: String, required: true, trim: true, minlength: 2, maxlength: 60 },
-    email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+    name: {
+      type: String,
+      required: true,
+      trim: true,
+      minlength: 2,
+      maxlength: 60,
+    },
+    email: {
+      type: String,
+      required: true,
+      unique: true,
+      lowercase: true,
+      trim: true,
+    },
     passwordHash: { type: String, required: true },
 
     isEmailVerified: { type: Boolean, default: false },
@@ -77,7 +89,48 @@ const userSchema = new mongoose.Schema(
 
     // ✅ WISHLIST (Protected)
     // List of Product ObjectIds (no duplicates enforced at DB level; handled in route logic)
-    wishlist: { type: [mongoose.Schema.Types.ObjectId], ref: "Product", default: [] },
+    wishlist: {
+      type: [mongoose.Schema.Types.ObjectId],
+      ref: "Product",
+      default: [],
+    },
+
+    // B2B / Wholesale
+    accountType: {
+      type: String,
+      enum: ["individual", "business"],
+      default: "individual",
+    },
+    businessName: { type: String, default: "", trim: true, maxlength: 200 },
+    businessId: { type: String, default: "", trim: true, maxlength: 50 },
+    taxId: { type: String, default: "", trim: true, maxlength: 50 },
+    wholesaleTier: {
+      type: String,
+      enum: ["none", "bronze", "silver", "gold"],
+      default: "none",
+    },
+    b2bApproved: { type: Boolean, default: false },
+    b2bAppliedAt: { type: Date, default: null },
+    b2bApprovedAt: { type: Date, default: null },
+    b2bRejectedAt: { type: Date, default: null },
+
+    // Credit terms (Net 30)
+    creditLimit: { type: Number, default: 0, min: 0 },
+    creditTermDays: { type: Number, default: 0, min: 0 },
+    creditBalance: { type: Number, default: 0, min: 0 },
+
+    // Per-customer custom pricing (overrides tier pricing)
+    customPricing: [
+      {
+        productId: { type: mongoose.Schema.Types.ObjectId, ref: "Product" },
+        price: { type: Number, min: 0 },
+        _id: false,
+      },
+    ],
+
+    // Volume-based tier progression tracking
+    totalB2BSpent: { type: Number, default: 0, min: 0 },
+    tierLockedByAdmin: { type: Boolean, default: false },
 
     // ✅ Admin-controlled blocking
     isBlocked: { type: Boolean, default: false },
@@ -93,5 +146,9 @@ const userSchema = new mongoose.Schema(
 
 // Compound index for blocked user queries
 userSchema.index({ isBlocked: 1, createdAt: -1 });
+
+// Index for B2B admin queries
+userSchema.index({ b2bAppliedAt: -1 });
+userSchema.index({ b2bApproved: 1, b2bAppliedAt: -1 });
 
 export const User = mongoose.model("User", userSchema);

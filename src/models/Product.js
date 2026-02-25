@@ -35,7 +35,7 @@ const productImageSchema = new Schema(
     // Sort order for gallery display
     sortOrder: { type: Number, default: 0, min: 0 },
   },
-  { _id: true }
+  { _id: true },
 );
 
 const variantAttributeSchema = new Schema(
@@ -99,7 +99,13 @@ const productStatsSchema = new Schema(
 const productSchema = new Schema(
   {
     // Bilingual fields (default language: Hebrew)
-    titleHe: { type: String, required: true, trim: true, minlength: 2, maxlength: 160 },
+    titleHe: {
+      type: String,
+      required: true,
+      trim: true,
+      minlength: 2,
+      maxlength: 160,
+    },
     titleAr: { type: String, default: "", trim: true, maxlength: 160 },
     descriptionHe: { type: String, default: "", trim: true, maxlength: 4000 },
     descriptionAr: { type: String, default: "", trim: true, maxlength: 4000 },
@@ -110,7 +116,13 @@ const productSchema = new Schema(
     // URL-safe slug for SEO routing.
     // Default undefined (NOT "") so indexing semantics align with Category model.
     // Auto-generated in pre-validate hook when missing.
-    slug: { type: String, default: undefined, trim: true, lowercase: true, maxlength: 160 },
+    slug: {
+      type: String,
+      default: undefined,
+      trim: true,
+      lowercase: true,
+      maxlength: 160,
+    },
 
     // Money in major units (ILS)
     price: { type: Number, required: true, min: 0 },
@@ -134,14 +146,41 @@ const productSchema = new Schema(
     saleStartAt: { type: Date, default: null },
     saleEndAt: { type: Date, default: null },
 
-    categoryId: { type: Schema.Types.ObjectId, ref: "Category", required: true },
+    // B2B / Wholesale tiered pricing
+    wholesalePricing: {
+      type: [
+        new Schema(
+          {
+            tier: {
+              type: String,
+              enum: ["bronze", "silver", "gold"],
+              required: true,
+            },
+            price: { type: Number, required: true, min: 0 },
+            minQty: { type: Number, default: 1, min: 1 },
+          },
+          { _id: false },
+        ),
+      ],
+      default: [],
+    },
+
+    categoryId: {
+      type: Schema.Types.ObjectId,
+      ref: "Category",
+      required: true,
+    },
 
     // Retail identity (optional)
     brand: { type: String, default: "", trim: true, maxlength: 120 },
     sku: { type: String, default: "", trim: true, maxlength: 80 },
     barcode: { type: String, default: "", trim: true, maxlength: 80 },
     sizeLabel: { type: String, default: "", trim: true, maxlength: 80 },
-    unit: { type: String, enum: ["ml", "g", "pcs", "set", null], default: null },
+    unit: {
+      type: String,
+      enum: ["ml", "g", "pcs", "set", null],
+      default: null,
+    },
     netQuantity: { type: Number, default: null, min: 0 },
     tags: { type: [String], default: [] },
 
@@ -182,8 +221,18 @@ const productSchema = new Schema(
       productLine: { type: String, default: "", trim: true, maxlength: 120 },
     },
     classification: {
-      categoryPrimary: { type: String, default: "", trim: true, maxlength: 120 },
-      categorySecondary: { type: String, default: "", trim: true, maxlength: 120 },
+      categoryPrimary: {
+        type: String,
+        default: "",
+        trim: true,
+        maxlength: 120,
+      },
+      categorySecondary: {
+        type: String,
+        default: "",
+        trim: true,
+        maxlength: 120,
+      },
     },
     specs: {
       batteryMah: { type: Number, default: null, min: 0 },
@@ -194,7 +243,12 @@ const productSchema = new Schema(
       motorSpeedRpmMin: { type: Number, default: null, min: 0 },
       motorSpeedRpmMax: { type: Number, default: null, min: 0 },
       speedModes: { type: Number, default: null, min: 0 },
-      waterproofRating: { type: String, default: "", trim: true, maxlength: 40 },
+      waterproofRating: {
+        type: String,
+        default: "",
+        trim: true,
+        maxlength: 40,
+      },
       displayType: { type: String, default: "", trim: true, maxlength: 40 },
       bladeMaterial: { type: String, default: "", trim: true, maxlength: 120 },
       foilMaterial: { type: String, default: "", trim: true, maxlength: 120 },
@@ -305,12 +359,15 @@ function buildVariantKeyFromAttributes(attributes) {
       if (!key) return null;
       const rawVal = a.valueKey || a.value;
       if (rawVal == null) return null;
-      const val = typeof rawVal === "string" ? normalizeKeyPart(rawVal) : String(rawVal);
+      const val =
+        typeof rawVal === "string" ? normalizeKeyPart(rawVal) : String(rawVal);
       if (!val) return null;
       return { key, val };
     })
     .filter(Boolean)
-    .sort((a, b) => (a.key === b.key ? a.val.localeCompare(b.val) : a.key.localeCompare(b.key)));
+    .sort((a, b) =>
+      a.key === b.key ? a.val.localeCompare(b.val) : a.key.localeCompare(b.key),
+    );
 
   return parts.map((p) => `${p.key}:${p.val}`).join("|");
 }
@@ -325,7 +382,11 @@ productSchema.pre("validate", function productPreValidate(next) {
         this.title ||
         this._id?.toString() ||
         Date.now().toString();
-      this.slug = await generateUniqueSlug(this.constructor, baseInput, this._id);
+      this.slug = await generateUniqueSlug(
+        this.constructor,
+        baseInput,
+        this._id,
+      );
     }
 
     // Sync legacy title/description so old UI code doesn't break
@@ -333,14 +394,19 @@ productSchema.pre("validate", function productPreValidate(next) {
     if (!this.description) this.description = this.descriptionHe || "";
 
     // Ensure integers for stock (defensive)
-    if (Number.isFinite(this.stock)) this.stock = Math.max(0, Math.trunc(this.stock));
+    if (Number.isFinite(this.stock))
+      this.stock = Math.max(0, Math.trunc(this.stock));
 
     // Normalize empty strings -> null for sale dates
     if (!this.saleStartAt) this.saleStartAt = null;
     if (!this.saleEndAt) this.saleEndAt = null;
 
     // If both dates exist, enforce start <= end
-    if (this.saleStartAt && this.saleEndAt && this.saleStartAt > this.saleEndAt) {
+    if (
+      this.saleStartAt &&
+      this.saleEndAt &&
+      this.saleStartAt > this.saleEndAt
+    ) {
       return next(new Error("saleStartAt must be <= saleEndAt"));
     }
 
@@ -406,7 +472,8 @@ productSchema.pre("validate", function productPreValidate(next) {
 
       this.variants.forEach((v) => {
         if (!v) return;
-        if (Number.isFinite(v.stock)) v.stock = Math.max(0, Math.trunc(v.stock));
+        if (Number.isFinite(v.stock))
+          v.stock = Math.max(0, Math.trunc(v.stock));
 
         if (v.priceOverride != null) {
           v.priceOverrideMinor = toMinorSafe(v.priceOverride);
@@ -470,11 +537,19 @@ productSchema.pre("validate", function productPreValidate(next) {
     // Auto-derive confidence grade
     if (!modelStr || hasCriticalMismatch) {
       this.confidenceGrade = "D";
-    } else if (isModelVerified && isCategoryVerified && verifiedSourcesCount >= 2) {
+    } else if (
+      isModelVerified &&
+      isCategoryVerified &&
+      verifiedSourcesCount >= 2
+    ) {
       this.confidenceGrade = "A";
     } else if (verifiedSourcesCount >= 2) {
       this.confidenceGrade = "B";
-    } else if (isModelVerified || isCategoryVerified || verifiedSourcesCount >= 1) {
+    } else if (
+      isModelVerified ||
+      isCategoryVerified ||
+      verifiedSourcesCount >= 1
+    ) {
       this.confidenceGrade = "C";
     } else {
       this.confidenceGrade = "D";
@@ -489,8 +564,9 @@ productSchema.pre("validate", function productPreValidate(next) {
       const bulletsAr = Array.isArray(this.publishContent?.bulletsAr)
         ? this.publishContent.bulletsAr
         : [];
-      const bulletCount = [...bulletsHe, ...bulletsAr].filter((b) => String(b || "").trim())
-        .length;
+      const bulletCount = [...bulletsHe, ...bulletsAr].filter((b) =>
+        String(b || "").trim(),
+      ).length;
       const hasShortDesc =
         String(this.publishContent?.shortDescHe || "").trim().length > 0 ||
         String(this.publishContent?.shortDescAr || "").trim().length > 0;
@@ -532,7 +608,10 @@ productSchema.index(
 // Unique slug guard (only enforce once slug is populated)
 productSchema.index(
   { slug: 1 },
-  { unique: true, partialFilterExpression: { slug: { $type: "string", $ne: "" } } }
+  {
+    unique: true,
+    partialFilterExpression: { slug: { $type: "string", $ne: "" } },
+  },
 );
 
 // Fast listing (active products)
@@ -544,7 +623,10 @@ productSchema.index({ isActive: 1, isDeleted: 1, createdAt: -1 });
 // Optional SKU uniqueness when provided
 productSchema.index(
   { sku: 1 },
-  { unique: true, partialFilterExpression: { sku: { $type: "string", $ne: "" } } },
+  {
+    unique: true,
+    partialFilterExpression: { sku: { $type: "string", $ne: "" } },
+  },
 );
 
 // Filters/sorting
@@ -554,12 +636,21 @@ productSchema.index({ isActive: 1, stock: 1 });
 // Ranking indexes (category-specific for filtered queries)
 productSchema.index({ categoryId: 1, "stats.soldCount30d": -1, createdAt: -1 });
 productSchema.index({ categoryId: 1, "stats.views7d": -1, createdAt: -1 });
-productSchema.index({ categoryId: 1, "stats.ratingAvg": -1, "stats.ratingCount": -1, createdAt: -1 });
+productSchema.index({
+  categoryId: 1,
+  "stats.ratingAvg": -1,
+  "stats.ratingCount": -1,
+  createdAt: -1,
+});
 
 // Ranking indexes (global for unfiltered queries)
 productSchema.index({ "stats.soldCount30d": -1, createdAt: -1 });
 productSchema.index({ "stats.views7d": -1, createdAt: -1 });
-productSchema.index({ "stats.ratingAvg": -1, "stats.ratingCount": -1, createdAt: -1 });
+productSchema.index({
+  "stats.ratingAvg": -1,
+  "stats.ratingCount": -1,
+  createdAt: -1,
+});
 
 // ✅ Helps onSale queries (still needs $expr in queries)
 productSchema.index({ salePrice: 1, price: 1, saleStartAt: 1, saleEndAt: 1 });
@@ -569,15 +660,22 @@ productSchema.index({ isDeleted: 1, updatedAt: -1 });
 productSchema.index({ categoryId: 1, isDeleted: 1, createdAt: -1 });
 
 // Catalog governance indexes
-productSchema.index({ catalogStatus: 1, isDeleted: 1, isActive: 1, createdAt: -1 });
+productSchema.index({
+  catalogStatus: 1,
+  isDeleted: 1,
+  isActive: 1,
+  createdAt: -1,
+});
 productSchema.index({ confidenceGrade: 1, updatedAt: -1 });
 productSchema.index({ "verification.lastVerifiedAt": -1 });
 productSchema.index(
   { "identity.internalSku": 1 },
   {
     unique: true,
-    partialFilterExpression: { "identity.internalSku": { $type: "string", $gt: "" } },
-  }
+    partialFilterExpression: {
+      "identity.internalSku": { $type: "string", $gt: "" },
+    },
+  },
 );
 productSchema.index({ "identity.model": 1, brand: 1 });
 

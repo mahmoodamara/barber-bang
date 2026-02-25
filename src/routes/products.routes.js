@@ -19,8 +19,16 @@ import { requireAuth, requireRole } from "../middleware/auth.js";
 import { validate } from "../middleware/validate.js";
 import { t } from "../utils/i18n.js";
 import { sanitizePlainText } from "../utils/sanitize.js";
-import { sendOk, sendCreated, sendError, setCacheHeaders } from "../utils/response.js";
-import { recordProductEngagement, recalculateProductRatingStats } from "../services/ranking.service.js";
+import {
+  sendOk,
+  sendCreated,
+  sendError,
+  setCacheHeaders,
+} from "../utils/response.js";
+import {
+  recordProductEngagement,
+  recalculateProductRatingStats,
+} from "../services/ranking.service.js";
 
 const router = express.Router();
 
@@ -38,7 +46,7 @@ function jsonErr(res, e) {
     res,
     e.statusCode || 500,
     e.code || "INTERNAL_ERROR",
-    e.message || "Unexpected error"
+    e.message || "Unexpected error",
   );
 }
 
@@ -50,7 +58,10 @@ function sanitizeSearchQuery(input, maxLen = 64) {
   const trimmed = String(input || "").trim();
   if (!trimmed) return "";
   const sliced = trimmed.slice(0, maxLen);
-  return sliced.replace(/[\u0000-\u001f]+/g, " ").replace(/\s+/g, " ").trim();
+  return sliced
+    .replace(/[\u0000-\u001f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function isValidObjectId(id) {
@@ -77,26 +88,46 @@ async function applyCatalogValidationToVariants(variants) {
     for (const a of v.attributes || []) {
       const def = byKey.get(a.key);
       if (!def || !def.isActive) {
-        throw makeErr(400, "INVALID_VARIANT_ATTRIBUTE", `Invalid attribute key: ${a.key}`);
+        throw makeErr(
+          400,
+          "INVALID_VARIANT_ATTRIBUTE",
+          `Invalid attribute key: ${a.key}`,
+        );
       }
 
       if (seen.has(a.key)) {
-        throw makeErr(400, "INVALID_VARIANT_ATTRIBUTE", `Duplicate attribute key: ${a.key}`);
+        throw makeErr(
+          400,
+          "INVALID_VARIANT_ATTRIBUTE",
+          `Duplicate attribute key: ${a.key}`,
+        );
       }
       seen.add(a.key);
 
       const type = String(def.type || "");
       if (a.type && String(a.type) !== type) {
-        throw makeErr(400, "INVALID_VARIANT_ATTRIBUTE", `Attribute ${a.key} type mismatch`);
+        throw makeErr(
+          400,
+          "INVALID_VARIANT_ATTRIBUTE",
+          `Attribute ${a.key} type mismatch`,
+        );
       }
 
       if (type === "text") {
         if (typeof a.value !== "string") {
-          throw makeErr(400, "INVALID_VARIANT_ATTRIBUTE", `Attribute ${a.key} must be text`);
+          throw makeErr(
+            400,
+            "INVALID_VARIANT_ATTRIBUTE",
+            `Attribute ${a.key} must be text`,
+          );
         }
         const val = a.value.trim();
         if (!val) {
-          throw makeErr(400, "INVALID_VARIANT_ATTRIBUTE", `Attribute ${a.key} cannot be empty`);
+          throw makeErr(
+            400,
+            "INVALID_VARIANT_ATTRIBUTE",
+            `Attribute ${a.key} cannot be empty`,
+          );
         }
         cleaned.push({ key: a.key, type, value: val, valueKey: "", unit: "" });
         continue;
@@ -105,12 +136,20 @@ async function applyCatalogValidationToVariants(variants) {
       if (type === "number") {
         const n = Number(a.value);
         if (!Number.isFinite(n)) {
-          throw makeErr(400, "INVALID_VARIANT_ATTRIBUTE", `Attribute ${a.key} must be a number`);
+          throw makeErr(
+            400,
+            "INVALID_VARIANT_ATTRIBUTE",
+            `Attribute ${a.key} must be a number`,
+          );
         }
         let unit = String(a.unit || "").trim();
         const defUnit = String(def.unit || "").trim();
         if (defUnit && unit && defUnit !== unit) {
-          throw makeErr(400, "INVALID_VARIANT_ATTRIBUTE", `Attribute ${a.key} unit must be ${defUnit}`);
+          throw makeErr(
+            400,
+            "INVALID_VARIANT_ATTRIBUTE",
+            `Attribute ${a.key} unit must be ${defUnit}`,
+          );
         }
         if (!unit && defUnit) unit = defUnit;
         cleaned.push({ key: a.key, type, value: n, valueKey: "", unit });
@@ -120,19 +159,31 @@ async function applyCatalogValidationToVariants(variants) {
       if (type === "enum") {
         const valueKey = normalizeKey(a.valueKey);
         if (!valueKey) {
-          throw makeErr(400, "INVALID_VARIANT_ATTRIBUTE", `Attribute ${a.key} requires valueKey`);
+          throw makeErr(
+            400,
+            "INVALID_VARIANT_ATTRIBUTE",
+            `Attribute ${a.key} requires valueKey`,
+          );
         }
         const opt = (def.options || []).find(
-          (o) => String(o?.valueKey || "") === valueKey && o?.isActive
+          (o) => String(o?.valueKey || "") === valueKey && o?.isActive,
         );
         if (!opt) {
-          throw makeErr(400, "INVALID_VARIANT_ATTRIBUTE", `Attribute ${a.key} valueKey is invalid`);
+          throw makeErr(
+            400,
+            "INVALID_VARIANT_ATTRIBUTE",
+            `Attribute ${a.key} valueKey is invalid`,
+          );
         }
         cleaned.push({ key: a.key, type, value: null, valueKey, unit: "" });
         continue;
       }
 
-      throw makeErr(400, "INVALID_VARIANT_ATTRIBUTE", `Attribute ${a.key} has invalid type`);
+      throw makeErr(
+        400,
+        "INVALID_VARIANT_ATTRIBUTE",
+        `Attribute ${a.key} has invalid type`,
+      );
     }
     v.attributes = cleaned;
   }
@@ -176,7 +227,10 @@ function mapProductImage(img, lang) {
     id: img?._id ? String(img._id) : null,
     url: img?.url || "",
     secureUrl: img?.secureUrl || img?.url || "",
-    alt: lang === "ar" ? (img?.altAr || img?.altHe || "") : (img?.altHe || img?.altAr || ""),
+    alt:
+      lang === "ar"
+        ? img?.altAr || img?.altHe || ""
+        : img?.altHe || img?.altAr || "",
     isPrimary: Boolean(img?.isPrimary),
     sortOrder: Number(img?.sortOrder || 0),
   };
@@ -202,7 +256,9 @@ function mapProductListItem(p, lang, now) {
   const onSale = isSaleActiveByPrice(p, now);
 
   // Map images array
-  const images = Array.isArray(p.images) ? p.images.map((img) => mapProductImage(img, lang)) : [];
+  const images = Array.isArray(p.images)
+    ? p.images.map((img) => mapProductImage(img, lang))
+    : [];
 
   return {
     id: p._id,
@@ -251,11 +307,11 @@ function mapProductListItem(p, lang, now) {
     // ✅ Sale block only when active by rule
     sale: onSale
       ? {
-        salePrice: Number(p.salePrice || 0),
-        discountPercent: p.discountPercent ?? null, // ✅ additive
-        saleStartAt: p.saleStartAt || null,
-        saleEndAt: p.saleEndAt || null,
-      }
+          salePrice: Number(p.salePrice || 0),
+          discountPercent: p.discountPercent ?? null, // ✅ additive
+          saleStartAt: p.saleStartAt || null,
+          saleEndAt: p.saleEndAt || null,
+        }
       : null,
   };
 }
@@ -279,7 +335,9 @@ function mapProductDetailsDoc(item, lang) {
   const onSale = isSaleActiveByPrice(obj, now);
 
   // Map images array
-  const images = Array.isArray(obj.images) ? obj.images.map((img) => mapProductImage(img, lang)) : [];
+  const images = Array.isArray(obj.images)
+    ? obj.images.map((img) => mapProductImage(img, lang))
+    : [];
 
   return {
     ...clean,
@@ -295,10 +353,10 @@ function mapProductDetailsDoc(item, lang) {
     // ✅ Normalize sale output
     sale: onSale
       ? {
-        salePrice: Number(obj.salePrice || 0),
-        saleStartAt: obj.saleStartAt || null,
-        saleEndAt: obj.saleEndAt || null,
-      }
+          salePrice: Number(obj.salePrice || 0),
+          saleStartAt: obj.saleStartAt || null,
+          saleEndAt: obj.saleEndAt || null,
+        }
       : null,
 
     variants: Array.isArray(obj.variants) ? obj.variants.map(mapVariant) : [],
@@ -319,11 +377,14 @@ router.get("/", async (req, res) => {
 
     const q = sanitizeSearchQuery(req.query.q);
     const categoryId = String(req.query.categoryId || "").trim();
-    const minPrice = req.query.minPrice != null ? Number(req.query.minPrice) : null;
-    const maxPrice = req.query.maxPrice != null ? Number(req.query.maxPrice) : null;
+    const minPrice =
+      req.query.minPrice != null ? Number(req.query.minPrice) : null;
+    const maxPrice =
+      req.query.maxPrice != null ? Number(req.query.maxPrice) : null;
 
     const onSale = String(req.query.onSale || "false") === "true";
     const inStock = String(req.query.inStock || "false") === "true";
+    const brand = String(req.query.brand || "").trim();
     // NOTE: `featured` query param is IGNORED for public endpoints.
     // Featured/best-seller lists must use the ranking endpoints (/products/featured, /products/best-sellers).
     // See: NO MANUAL FLAGS store rule.
@@ -342,6 +403,16 @@ router.get("/", async (req, res) => {
         throw makeErr(400, "VALIDATION_ERROR", "Invalid categoryId");
       }
       filter.categoryId = categoryId;
+    }
+
+    // Brand filter (case-insensitive)
+    if (brand) {
+      filter.brand = {
+        $regex: new RegExp(
+          `^${brand.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+          "i",
+        ),
+      };
     }
 
     // Price range filters (base price)
@@ -397,7 +468,11 @@ router.get("/", async (req, res) => {
     }
 
     const [items, total] = await Promise.all([
-      query.sort(sortOption).skip((page - 1) * limit).limit(limit).lean(),
+      query
+        .sort(sortOption)
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
       Product.countDocuments(filter),
     ]);
 
@@ -419,7 +494,7 @@ router.get("/", async (req, res) => {
         pages,
         hasNext: page < pages,
         hasPrev: page > 1,
-      }
+      },
     );
   } catch (e) {
     return jsonErr(res, e);
@@ -431,7 +506,13 @@ router.get("/", async (req, res) => {
    GET /api/products/:slugOrId
 ============================================================================ */
 
-const RANKING_LITERALS = ["best-sellers", "most-popular", "top-rated", "featured", "new-arrivals"];
+const RANKING_LITERALS = [
+  "best-sellers",
+  "most-popular",
+  "top-rated",
+  "featured",
+  "new-arrivals",
+];
 
 router.get("/:slugOrId", async (req, res, next) => {
   try {
@@ -476,6 +557,98 @@ router.get("/:slugOrId", async (req, res, next) => {
 });
 
 /* ============================================================================
+   BRANDS LIST
+   GET /api/products/brands
+   Returns distinct brands from active products.
+============================================================================ */
+
+router.get("/brands", async (req, res) => {
+  try {
+    const brands = await Product.distinct("brand", {
+      isActive: true,
+      isDeleted: { $ne: true },
+      brand: { $ne: "", $exists: true },
+    });
+
+    const sorted = brands.filter(Boolean).sort((a, b) => a.localeCompare(b));
+
+    setCacheHeaders(res, { sMaxAge: 300, staleWhileRevalidate: 600 });
+    return sendOk(res, sorted);
+  } catch (e) {
+    return jsonErr(res, e);
+  }
+});
+
+/* ============================================================================
+   RELATED PRODUCTS
+   GET /api/products/:id/related?limit
+   Returns products from the same category, excluding the current product.
+   Sorted by sales rank, limited to 12 by default.
+============================================================================ */
+
+router.get("/:id/related", async (req, res) => {
+  try {
+    const productId = String(req.params.id || "").trim();
+    if (!productId) return sendNotFound(res);
+
+    const filter = { isActive: true, isDeleted: { $ne: true } };
+    if (isValidObjectId(productId)) {
+      filter._id = productId;
+    } else {
+      filter.slug = productId.toLowerCase();
+    }
+
+    const source = await Product.findOne(filter).lean();
+    if (!source) return sendNotFound(res);
+
+    const limit = Math.min(Math.max(Number(req.query.limit) || 12, 1), 24);
+    const now = new Date();
+
+    const relatedFilter = {
+      _id: { $ne: source._id },
+      isActive: true,
+      isDeleted: { $ne: true },
+    };
+
+    if (source.categoryId) {
+      relatedFilter.categoryId = source.categoryId;
+    }
+
+    let items = await Product.find(relatedFilter)
+      .sort({ soldCountAll: -1, ratingAvg: -1, createdAt: -1 })
+      .limit(limit)
+      .lean();
+
+    // If same-category products are too few, backfill from other categories
+    if (items.length < limit && source.categoryId) {
+      const existingIds = [source._id, ...items.map((p) => p._id)];
+      const backfill = await Product.find({
+        _id: { $nin: existingIds },
+        isActive: true,
+        isDeleted: { $ne: true },
+      })
+        .sort({ soldCountAll: -1, ratingAvg: -1 })
+        .limit(limit - items.length)
+        .lean();
+      items = items.concat(backfill);
+    }
+
+    setCacheHeaders(res, {
+      sMaxAge: 120,
+      staleWhileRevalidate: 300,
+      vary: "Accept-Language",
+    });
+
+    return sendOk(
+      res,
+      items.map((p) => mapProductListItem(p, req.lang, now)),
+    );
+  } catch (e) {
+    return jsonErr(res, e);
+  }
+});
+
+/* ============================================================================
    REVIEWS
    1) GET  /api/products/:id/reviews?page&limit
    2) POST /api/products/:id/reviews  (Protected)
@@ -498,7 +671,11 @@ router.get("/:id/reviews", validate(reviewsListSchema), async (req, res) => {
       return sendError(res, 400, "BAD_REQUEST", "Invalid product id");
     }
 
-    const exists = await Product.exists({ _id: productId, isActive: true, isDeleted: { $ne: true } });
+    const exists = await Product.exists({
+      _id: productId,
+      isActive: true,
+      isDeleted: { $ne: true },
+    });
     if (!exists) {
       return sendNotFound(res);
     }
@@ -509,7 +686,10 @@ router.get("/:id/reviews", validate(reviewsListSchema), async (req, res) => {
     const items = await Review.find({
       productId,
       isHidden: { $ne: true },
-      $or: [{ moderationStatus: "approved" }, { moderationStatus: { $exists: false } }],
+      $or: [
+        { moderationStatus: "approved" },
+        { moderationStatus: { $exists: false } },
+      ],
     })
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
@@ -544,50 +724,59 @@ const reviewCreateSchema = z.object({
  * - prevent multiple reviews per user per product
  * ✅ choose: update existing (better UX)
  */
-router.post("/:id/reviews", requireAuth(), validate(reviewCreateSchema), async (req, res) => {
-  try {
-    const productId = String(req.params.id || "");
-    if (!isValidObjectId(productId)) {
-      return sendNotFound(res);
-    }
+router.post(
+  "/:id/reviews",
+  requireAuth(),
+  validate(reviewCreateSchema),
+  async (req, res) => {
+    try {
+      const productId = String(req.params.id || "");
+      if (!isValidObjectId(productId)) {
+        return sendNotFound(res);
+      }
 
-    const exists = await Product.exists({ _id: productId, isActive: true, isDeleted: { $ne: true } });
-    if (!exists) {
-      return sendNotFound(res);
-    }
+      const exists = await Product.exists({
+        _id: productId,
+        isActive: true,
+        isDeleted: { $ne: true },
+      });
+      if (!exists) {
+        return sendNotFound(res);
+      }
 
-    const { rating, comment } = req.validated.body;
-    const safeComment = sanitizePlainText(comment || "", { maxLen: 600 });
+      const { rating, comment } = req.validated.body;
+      const safeComment = sanitizePlainText(comment || "", { maxLen: 600 });
 
-    const updated = await Review.findOneAndUpdate(
-      { productId, userId: req.user._id },
-      {
-        $set: {
-          rating,
-          comment: safeComment,
+      const updated = await Review.findOneAndUpdate(
+        { productId, userId: req.user._id },
+        {
+          $set: {
+            rating,
+            comment: safeComment,
+          },
         },
-      },
-      {
-        new: true,
-        upsert: true,
-        setDefaultsOnInsert: true,
-      },
-    ).lean();
+        {
+          new: true,
+          upsert: true,
+          setDefaultsOnInsert: true,
+        },
+      ).lean();
 
-    await recalculateProductRatingStats(updated.productId).catch(() => {});
+      await recalculateProductRatingStats(updated.productId).catch(() => {});
 
-    return sendCreated(res, {
-      id: updated._id,
-      _id: updated._id,
-      productId: updated.productId,
-      userId: updated.userId,
-      rating: updated.rating,
-      comment: updated.comment || "",
-      createdAt: updated.createdAt,
-    });
-  } catch (e) {
-    return jsonErr(res, e);
-  }
-});
+      return sendCreated(res, {
+        id: updated._id,
+        _id: updated._id,
+        productId: updated.productId,
+        userId: updated.userId,
+        rating: updated.rating,
+        comment: updated.comment || "",
+        createdAt: updated.createdAt,
+      });
+    } catch (e) {
+      return jsonErr(res, e);
+    }
+  },
+);
 
 export default router;

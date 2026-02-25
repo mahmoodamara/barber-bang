@@ -113,6 +113,346 @@ function sortByOrder(arr, orderKey = "sortOrder") {
   return [...(arr || [])].sort((a, b) => Number(a?.[orderKey] || 0) - Number(b?.[orderKey] || 0));
 }
 
+const CATEGORY_KEY = Object.freeze({
+  HAIR_CLIPPERS: "hair_clippers",
+  FOIL_SHAVERS: "foil_shavers",
+  TRIMMERS: "trimmers",
+  HAIR_DRYERS_BLOWERS: "hair_dryers_blowers",
+  ELECTRIC_HAIR_STYLERS: "electric_hair_stylers",
+  FACIAL_CARE: "facial_care",
+  WAX_HAIR_REMOVAL: "wax_hair_removal",
+  HAIR_CARE: "hair_care",
+  STYLING_PRODUCTS: "styling_products",
+  BEARD_AFTER_SHAVE: "beard_after_shave",
+  BUNDLES: "bundles",
+  MACHINE_MAINTENANCE: "machine_maintenance",
+});
+
+const CATEGORY_AR_BY_KEY = Object.freeze({
+  [CATEGORY_KEY.HAIR_CLIPPERS]: "ماكينات قص الشعر",
+  [CATEGORY_KEY.FOIL_SHAVERS]: "ماكينات حلاقة الوجه / الشيفرات",
+  [CATEGORY_KEY.TRIMMERS]: "تريمرات وتشذيب دقيق",
+  [CATEGORY_KEY.HAIR_DRYERS_BLOWERS]: "مجففات الشعر والمنافخ",
+  [CATEGORY_KEY.ELECTRIC_HAIR_STYLERS]: "مصففات الشعر الكهربائية",
+  [CATEGORY_KEY.FACIAL_CARE]: "العناية بالوجه",
+  [CATEGORY_KEY.WAX_HAIR_REMOVAL]: "إزالة الشعر والشمع",
+  [CATEGORY_KEY.HAIR_CARE]: "شامبو وعناية الشعر",
+  [CATEGORY_KEY.STYLING_PRODUCTS]: "تصفيف الشعر",
+  [CATEGORY_KEY.BEARD_AFTER_SHAVE]: "العناية باللحية وما بعد الحلاقة",
+  [CATEGORY_KEY.BUNDLES]: "أطقم وباقات",
+  [CATEGORY_KEY.MACHINE_MAINTENANCE]: "صيانة وتعقيم الماكينات",
+});
+
+const CATEGORY_PRIMARY_BY_KEY = Object.freeze({
+  [CATEGORY_KEY.HAIR_CLIPPERS]: "Hair Clipper",
+  [CATEGORY_KEY.FOIL_SHAVERS]: "Foil Shaver",
+  [CATEGORY_KEY.TRIMMERS]: "Trimmer / Precision Grooming",
+  [CATEGORY_KEY.HAIR_DRYERS_BLOWERS]: "Hair Dryer / Blower",
+  [CATEGORY_KEY.ELECTRIC_HAIR_STYLERS]: "Electric Hair Styler",
+  [CATEGORY_KEY.FACIAL_CARE]: "Facial Care Device",
+  [CATEGORY_KEY.WAX_HAIR_REMOVAL]: "Hair Removal / Wax",
+  [CATEGORY_KEY.HAIR_CARE]: "Hair Care",
+  [CATEGORY_KEY.STYLING_PRODUCTS]: "Hair Styling Product",
+  [CATEGORY_KEY.BEARD_AFTER_SHAVE]: "Beard Care / After Shave",
+  [CATEGORY_KEY.BUNDLES]: "Bundle / Kit",
+  [CATEGORY_KEY.MACHINE_MAINTENANCE]: "Machine Maintenance / Disinfection",
+});
+
+const CATEGORY_SECONDARY_BY_KEY = Object.freeze({
+  [CATEGORY_KEY.HAIR_CLIPPERS]: "Clipper / Barber / Fade",
+  [CATEGORY_KEY.FOIL_SHAVERS]: "Foil / Face Shaver",
+  [CATEGORY_KEY.TRIMMERS]: "T-Blade / Detail / Body / Nose & Ear",
+  [CATEGORY_KEY.HAIR_DRYERS_BLOWERS]: "Hair Dryer / Blower / Compressor",
+  [CATEGORY_KEY.ELECTRIC_HAIR_STYLERS]: "Hot Brush / Straightener / Curler",
+  [CATEGORY_KEY.FACIAL_CARE]: "Facial Cleansing Device",
+  [CATEGORY_KEY.WAX_HAIR_REMOVAL]: "Wax / Hair Removal",
+  [CATEGORY_KEY.HAIR_CARE]: "Shampoo / Mask / Treatment",
+  [CATEGORY_KEY.STYLING_PRODUCTS]: "Wax / Clay / Styling Hold",
+  [CATEGORY_KEY.BEARD_AFTER_SHAVE]: "Beard Care / After Shave",
+  [CATEGORY_KEY.BUNDLES]: "Bundle / Multi-Item Kit",
+  [CATEGORY_KEY.MACHINE_MAINTENANCE]: "Maintenance / Disinfection",
+});
+
+const NON_DEVICE_CATEGORY_PRIORITY = [
+  CATEGORY_KEY.BUNDLES,
+  CATEGORY_KEY.MACHINE_MAINTENANCE,
+  CATEGORY_KEY.WAX_HAIR_REMOVAL,
+  CATEGORY_KEY.HAIR_CARE,
+  CATEGORY_KEY.STYLING_PRODUCTS,
+  CATEGORY_KEY.BEARD_AFTER_SHAVE,
+  CATEGORY_KEY.FACIAL_CARE,
+];
+
+// Required device keyword priority:
+// Foil/Shaver > Trimmer > Hair Styler > Hair Dryer/Blower > Clipper
+const DEVICE_CATEGORY_PRIORITY = [
+  CATEGORY_KEY.FOIL_SHAVERS,
+  CATEGORY_KEY.TRIMMERS,
+  CATEGORY_KEY.ELECTRIC_HAIR_STYLERS,
+  CATEGORY_KEY.HAIR_DRYERS_BLOWERS,
+  CATEGORY_KEY.HAIR_CLIPPERS,
+];
+
+const CATEGORY_KEYWORDS = Object.freeze({
+  [CATEGORY_KEY.BUNDLES]: [
+    "bundle",
+    "kit",
+    "set",
+    "bundle kit",
+    "mystery box",
+    "مجموعة",
+    "طقم",
+    "أطقم",
+    "باقة",
+    "מארז",
+    "באנדל",
+    "ערכה",
+    "סט",
+  ],
+  [CATEGORY_KEY.MACHINE_MAINTENANCE]: [
+    "maintenance",
+    "disinfect",
+    "disinfection",
+    "sanitize",
+    "sanitizing",
+    "steril",
+    "blade spray",
+    "clipper spray",
+    "4-in-1 spray",
+    "spray 4-in-1",
+    "صيانة",
+    "تعقيم",
+    "تطهير",
+    "حماية الشفرات",
+    "תחזוקה",
+    "חיטוי",
+    "ספריי חיטוי",
+  ],
+  [CATEGORY_KEY.WAX_HAIR_REMOVAL]: [
+    "hair removal",
+    "depil",
+    "wax heater",
+    "wax warming",
+    "body wax",
+    "hot wax",
+    "إزالة الشعر",
+    "الشمع",
+    "شمع",
+    "سخان شمع",
+    "תסיר שיער",
+    "הסרת שיער",
+    "שעווה",
+    "מחמם שעווה",
+  ],
+  [CATEGORY_KEY.HAIR_CARE]: [
+    "shampoo",
+    "mask",
+    "leave-in",
+    "treatment",
+    "keratin",
+    "hair cream",
+    "therapycare",
+    "شامبو",
+    "ماسك",
+    "عناية الشعر",
+    "كيراتين",
+    "שמפו",
+    "מסכה",
+    "קרטין",
+    "טיפוח שיער",
+  ],
+  [CATEGORY_KEY.STYLING_PRODUCTS]: [
+    "clay wax",
+    "aqua wax",
+    "booster wax",
+    "matte wax",
+    "wax",
+    "clay",
+    "pomade",
+    "hair styling",
+    "hold",
+    "تصفيف",
+    "واكس",
+    "كلاي",
+    "ווקס",
+    "עיצוב שיער",
+    "חימר לשיער",
+  ],
+  [CATEGORY_KEY.BEARD_AFTER_SHAVE]: [
+    "beard",
+    "mustache",
+    "after shave",
+    "aftershave",
+    "cologne",
+    "post-shave",
+    "لحية",
+    "شارب",
+    "ما بعد الحلاقة",
+    "افتر شيف",
+    "كولونيا",
+    "זקן",
+    "אחרי גילוח",
+    "אפטר שייב",
+  ],
+  [CATEGORY_KEY.FACIAL_CARE]: [
+    "facial care",
+    "facial cleanser",
+    "face cleaner",
+    "العناية بالوجه",
+    "تنظيف الوجه",
+    "טיפוח פנים",
+    "ניקוי פנים",
+  ],
+  [CATEGORY_KEY.FOIL_SHAVERS]: ["foil", "foil shaver", "shaver", "face shaver", "wet & dry shaver", "شيفر", "فويل", "ماكينة فويل", "ماشينة فويل", "שייבר", "מכונת גילוח"],
+  [CATEGORY_KEY.TRIMMERS]: [
+    "trimmer",
+    "t-blade",
+    "outline",
+    "detailing",
+    "nose",
+    "ear",
+    "body trimmer",
+    "تشذيب",
+    "تحديد",
+    "تريمر",
+    "تشذيب دقيق",
+    "أنف",
+    "أذن",
+    "טרימר",
+    "קוצץ",
+    "tblade",
+  ],
+  [CATEGORY_KEY.ELECTRIC_HAIR_STYLERS]: [
+    "electric hair brush",
+    "hair styler",
+    "styling brush",
+    "hot brush",
+    "straightener",
+    "flat iron",
+    "curler",
+    "curling",
+    "فرشاة شعر كهربائية",
+    "مصفف شعر",
+    "مصففات شعر",
+    "מברשת שיער חשמלית",
+    "מחליק",
+    "מסלסל",
+  ],
+  [CATEGORY_KEY.HAIR_DRYERS_BLOWERS]: [
+    "مجفف",
+    "سشوار",
+    "dryer",
+    "blow dryer",
+    "מפוח",
+    "blower",
+    "compressor",
+    "cyclone",
+    "tornado",
+    "tifone",
+    "פן",
+    "מייבש שיער",
+  ],
+  [CATEGORY_KEY.HAIR_CLIPPERS]: [
+    "clipper",
+    "barber clipper",
+    "fade clipper",
+    "grading clipper",
+    "ماكينة قص",
+    "ماكينة تدريج",
+    "قص الشعر",
+    "מכונת תספורת",
+    "מכונת דירוג",
+  ],
+});
+
+function normalizeCategoryText(input) {
+  return String(input || "").toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function includesAnyKeyword(text, keywords = []) {
+  if (!text) return false;
+  return keywords.some((keyword) => {
+    const normalizedKeyword = normalizeCategoryText(keyword);
+    return normalizedKeyword ? text.includes(normalizedKeyword) : false;
+  });
+}
+
+function detectCategoryKey(text, orderedKeys) {
+  const normalizedText = normalizeCategoryText(text);
+  if (!normalizedText) return null;
+
+  for (const key of orderedKeys) {
+    const keywords = CATEGORY_KEYWORDS[key] || [];
+    if (includesAnyKeyword(normalizedText, keywords)) return key;
+  }
+  return null;
+}
+
+function resolveProductCategoryKey(product) {
+  const categoryPrimaryText = String(product?.classification?.categoryPrimary || "");
+  const categorySecondaryText = String(product?.classification?.categorySecondary || "");
+  const classificationText = [
+    categoryPrimaryText,
+    categorySecondaryText,
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  const searchableText = [
+    product?.titleHe,
+    product?.titleAr,
+    product?.descriptionHe,
+    product?.descriptionAr,
+    classificationText,
+    product?.brand,
+    product?.sku,
+    ...(product?.tags || []),
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  const primaryOrderedKeys = [...NON_DEVICE_CATEGORY_PRIORITY, ...DEVICE_CATEGORY_PRIORITY];
+  const explicitPrimaryKey = detectCategoryKey(categoryPrimaryText, primaryOrderedKeys);
+  if (explicitPrimaryKey) return explicitPrimaryKey;
+
+  const classificationDeviceKey = detectCategoryKey(classificationText, DEVICE_CATEGORY_PRIORITY);
+  if (classificationDeviceKey) return classificationDeviceKey;
+
+  const classificationNonDeviceKey = detectCategoryKey(classificationText, NON_DEVICE_CATEGORY_PRIORITY);
+  if (classificationNonDeviceKey) return classificationNonDeviceKey;
+
+  const inferredDeviceKey = detectCategoryKey(searchableText, DEVICE_CATEGORY_PRIORITY);
+  const inferredNonDeviceKey = detectCategoryKey(searchableText, NON_DEVICE_CATEGORY_PRIORITY);
+
+  if (
+    inferredDeviceKey &&
+    inferredNonDeviceKey &&
+    inferredNonDeviceKey !== CATEGORY_KEY.BUNDLES &&
+    inferredNonDeviceKey !== CATEGORY_KEY.MACHINE_MAINTENANCE
+  ) {
+    console.warn(
+      `⚠️ Category keyword overlap for ${product?.sku || "UNKNOWN-SKU"}: device=${inferredDeviceKey}, nonDevice=${inferredNonDeviceKey}. Using device priority.`
+    );
+  }
+
+  if (inferredNonDeviceKey === CATEGORY_KEY.BUNDLES || inferredNonDeviceKey === CATEGORY_KEY.MACHINE_MAINTENANCE) {
+    return inferredNonDeviceKey;
+  }
+
+  return inferredDeviceKey || inferredNonDeviceKey || null;
+}
+
+function buildCategoryMapByKey(categories) {
+  const byNameAr = new Map(categories.map((c) => [c.nameAr, c]));
+  const byKey = new Map();
+
+  for (const [key, nameAr] of Object.entries(CATEGORY_AR_BY_KEY)) {
+    byKey.set(key, byNameAr.get(nameAr));
+  }
+
+  return byKey;
+}
+
 async function wipeDatabase() {
   console.log("🧹 WIPING DATABASE...");
 
@@ -392,7 +732,7 @@ async function createCategories() {
   const categoriesInput = [
     {
       nameHe: "מכונות תספורת",
-      nameAr: "ماكينات قص الشعر",
+      nameAr: CATEGORY_AR_BY_KEY[CATEGORY_KEY.HAIR_CLIPPERS],
       imageUrl: "/uploads/seed/categories/hair-clippers.jpg",
       descriptionHe: "מכונות תספורת מקצועיות לשימוש ביתי ומקצועי.",
       descriptionAr: "ماكينات قص احترافية للاستخدام المنزلي والمهني.",
@@ -405,7 +745,7 @@ async function createCategories() {
     },
     {
       nameHe: "מכונות גילוח פויל",
-      nameAr: "ماكينات فويل للحلاقة",
+      nameAr: CATEGORY_AR_BY_KEY[CATEGORY_KEY.FOIL_SHAVERS],
       imageUrl: "/uploads/seed/categories/foil-shavers.jpg",
       descriptionHe: "מכונות פויל לגילוח חלק, מהיר ונקי.",
       descriptionAr: "ماكينات فويل لحلاقة ناعمة وسريعة ونظيفة.",
@@ -418,7 +758,7 @@ async function createCategories() {
     },
     {
       nameHe: "טרימרים מקצועיים",
-      nameAr: "تريمرات احترافية",
+      nameAr: CATEGORY_AR_BY_KEY[CATEGORY_KEY.TRIMMERS],
       imageUrl: "/uploads/seed/categories/trimmers.jpg",
       descriptionHe: "טרימרים לדיוק קווים, T-Blade וטרימרי גוף.",
       descriptionAr: "تريمرات للتحديد الدقيق، T-Blade وتريمر الجسم.",
@@ -430,8 +770,34 @@ async function createCategories() {
       metaDescriptionAr: "تريمرات احترافية لكل احتياج.",
     },
     {
+      nameHe: "מייבשי שיער ומפוחים",
+      nameAr: CATEGORY_AR_BY_KEY[CATEGORY_KEY.HAIR_DRYERS_BLOWERS],
+      imageUrl: "/uploads/seed/categories/hair-dryers.jpg",
+      descriptionHe: "מייבשי שיער מקצועיים, מפוחים וקומפרסורים לעמדת העבודה.",
+      descriptionAr: "مجففات شعر احترافية ومنافخ/كمبروسرات لمحطة العمل.",
+      isActive: true,
+      sortOrder: 35,
+      metaTitleHe: "מייבשי שיער ומפוחים מקצועיים",
+      metaTitleAr: "مجففات الشعر والمنافخ الاحترافية",
+      metaDescriptionHe: "מייבשים ומפוחים חזקים לייבוש וניקוי מקצועי.",
+      metaDescriptionAr: "مجففات ومنافخ قوية للتجفيف والتنظيف الاحترافي.",
+    },
+    {
+      nameHe: "מכשירי עיצוב שיער חשמליים",
+      nameAr: CATEGORY_AR_BY_KEY[CATEGORY_KEY.ELECTRIC_HAIR_STYLERS],
+      imageUrl: "/uploads/seed/categories/electric-stylers.jpg",
+      descriptionHe: "מברשות ומכשירי עיצוב שיער חשמליים לעיצוב מהיר ומדויק.",
+      descriptionAr: "مصففات وفرش شعر كهربائية لتصفيف سريع ودقيق.",
+      isActive: true,
+      sortOrder: 38,
+      metaTitleHe: "מכשירי עיצוב שיער חשמליים",
+      metaTitleAr: "مصففات الشعر الكهربائية",
+      metaDescriptionHe: "כלי עיצוב חשמליים: מברשות חמות, מחליקים ומסלסלים.",
+      metaDescriptionAr: "أجهزة تصفيف كهربائية: فرش حرارية ومكواة وفير.",
+    },
+    {
       nameHe: "טיפוח פנים",
-      nameAr: "العناية بالوجه",
+      nameAr: CATEGORY_AR_BY_KEY[CATEGORY_KEY.FACIAL_CARE],
       imageUrl: "/uploads/seed/categories/facial-care.jpg",
       descriptionHe: "מכשירי ניקוי וטיפוח פנים מתקדמים.",
       descriptionAr: "أجهزة تنظيف وعناية متقدمة للوجه.",
@@ -444,7 +810,7 @@ async function createCategories() {
     },
     {
       nameHe: "הסרת שיער ושעווה",
-      nameAr: "إزالة الشعر والشمع",
+      nameAr: CATEGORY_AR_BY_KEY[CATEGORY_KEY.WAX_HAIR_REMOVAL],
       imageUrl: "/uploads/seed/categories/facial-care.jpg",
       descriptionHe: "מכשירים ומוצרים לחימום שעווה והסרת שיער בבית או בקליניקה.",
       descriptionAr: "أجهزة ومنتجات لتسخين الشمع وإزالة الشعر للاستخدام المنزلي أو المهني.",
@@ -457,7 +823,7 @@ async function createCategories() {
     },
     {
       nameHe: "שמפו וטיפוח שיער",
-      nameAr: "شامبو وعناية الشعر",
+      nameAr: CATEGORY_AR_BY_KEY[CATEGORY_KEY.HAIR_CARE],
       imageUrl: "/uploads/seed/categories/hair-care.jpg",
       descriptionHe: "שמפו טיפולי, מסכות ומוצרי טיפול ללא שטיפה.",
       descriptionAr: "شامبو علاجي، ماسكات ومنتجات عناية بدون شطف.",
@@ -470,7 +836,7 @@ async function createCategories() {
     },
     {
       nameHe: "עיצוב שיער",
-      nameAr: "تصفيف الشعر",
+      nameAr: CATEGORY_AR_BY_KEY[CATEGORY_KEY.STYLING_PRODUCTS],
       imageUrl: "/uploads/seed/categories/styling.jpg",
       descriptionHe: "ווקסים ומוצרי סטיילינג - מט, טבעי ומבריק.",
       descriptionAr: "واكسات ومنتجات تصفيف - مطفي، طبيعي ولامع.",
@@ -482,17 +848,43 @@ async function createCategories() {
       metaDescriptionAr: "واكسات احترافية لتصفيف الشعر اليومي.",
     },
     {
-      nameHe: "אחרי גילוח",
-      nameAr: "ما بعد الحلاقة",
+      nameHe: "טיפוח זקן ואחרי גילוח",
+      nameAr: CATEGORY_AR_BY_KEY[CATEGORY_KEY.BEARD_AFTER_SHAVE],
       imageUrl: "/uploads/seed/categories/after-shave.jpg",
-      descriptionHe: "מוצרי רענון וטיפוח אחרי גילוח.",
-      descriptionAr: "منتجات انتعاش وعناية بعد الحلاقة.",
+      descriptionHe: "שמנים, קרמים וקולוניות לטיפוח זקן ואחרי גילוח.",
+      descriptionAr: "زيوت وكريمات وكولونيا للعناية باللحية وما بعد الحلاقة.",
       isActive: true,
       sortOrder: 70,
-      metaTitleHe: "אחרי גילוח | Pier Jouliet After Shave",
-      metaTitleAr: "ما بعد الحلاقة | Pier Jouliet After Shave",
-      metaDescriptionHe: "קולוניה ומוצרי אפטר שייב איכותיים.",
-      metaDescriptionAr: "كولونيا ومنتجات أفتر شيف عالية الجودة.",
+      metaTitleHe: "טיפוח זקן ואחרי גילוח",
+      metaTitleAr: "العناية باللحية وما بعد الحلاقة",
+      metaDescriptionHe: "מוצרי טיפוח לזקן ואפטר שייב איכותיים.",
+      metaDescriptionAr: "منتجات عالية الجودة للعناية باللحية وما بعد الحلاقة.",
+    },
+    {
+      nameHe: "ערכות ובאנדלים",
+      nameAr: CATEGORY_AR_BY_KEY[CATEGORY_KEY.BUNDLES],
+      imageUrl: "/uploads/seed/categories/bundles.jpg",
+      descriptionHe: "מארזים ובאנדלים משתלמים של מוצרים משלימים.",
+      descriptionAr: "أطقم وباقات موفرة من منتجات متكاملة.",
+      isActive: true,
+      sortOrder: 80,
+      metaTitleHe: "ערכות ובאנדלים",
+      metaTitleAr: "أطقم وباقات",
+      metaDescriptionHe: "מארזים מוכנים לשגרה מלאה במחיר משתלם.",
+      metaDescriptionAr: "باقات جاهزة لروتين كامل بسعر أوفر.",
+    },
+    {
+      nameHe: "תחזוקה וחיטוי למכונות",
+      nameAr: CATEGORY_AR_BY_KEY[CATEGORY_KEY.MACHINE_MAINTENANCE],
+      imageUrl: "/uploads/seed/categories/maintenance.jpg",
+      descriptionHe: "מוצרי תחזוקה, חיטוי ושימון למכונות תספורת וגילוח.",
+      descriptionAr: "منتجات صيانة وتعقيم وتشحيم لماكينات القص والحلاقة.",
+      isActive: true,
+      sortOrder: 90,
+      metaTitleHe: "תחזוקה וחיטוי למכונות",
+      metaTitleAr: "صيانة وتعقيم الماكينات",
+      metaDescriptionHe: "ספרייים ומוצרי תחזוקה לשמירה על ביצועים והיגיינה.",
+      metaDescriptionAr: "سبرايات ومنتجات صيانة للحفاظ على الأداء والنظافة.",
     },
   ];
 
@@ -505,19 +897,39 @@ async function createCategories() {
    Products (Catalog Set)
 ========================================= */
 async function createProducts(categories) {
-  const byNameAr = new Map(categories.map((c) => [c.nameAr, c]));
+  const categoryByKey = buildCategoryMapByKey(categories);
 
-  const catHairClippers = byNameAr.get("ماكينات قص الشعر");
-  const catFoilShavers = byNameAr.get("ماكينات فويل للحلاقة");
-  const catTrimmers = byNameAr.get("تريمرات احترافية");
-  const catFacialCare = byNameAr.get("العناية بالوجه");
-  const catWaxHairRemoval = byNameAr.get("إزالة الشعر والشمع");
-  const catHairCare = byNameAr.get("شامبو وعناية الشعر");
-  const catStyling = byNameAr.get("تصفيف الشعر");
-  const catAfterShave = byNameAr.get("ما بعد الحلاقة");
+  const catHairClippers = categoryByKey.get(CATEGORY_KEY.HAIR_CLIPPERS);
+  const catFoilShavers = categoryByKey.get(CATEGORY_KEY.FOIL_SHAVERS);
+  const catTrimmers = categoryByKey.get(CATEGORY_KEY.TRIMMERS);
+  const catHairDryersBlowers = categoryByKey.get(CATEGORY_KEY.HAIR_DRYERS_BLOWERS);
+  const catElectricHairStylers = categoryByKey.get(CATEGORY_KEY.ELECTRIC_HAIR_STYLERS);
+  const catFacialCare = categoryByKey.get(CATEGORY_KEY.FACIAL_CARE);
+  const catWaxHairRemoval = categoryByKey.get(CATEGORY_KEY.WAX_HAIR_REMOVAL);
+  const catHairCare = categoryByKey.get(CATEGORY_KEY.HAIR_CARE);
+  const catStyling = categoryByKey.get(CATEGORY_KEY.STYLING_PRODUCTS);
+  const catAfterShave = categoryByKey.get(CATEGORY_KEY.BEARD_AFTER_SHAVE);
+  const catBundles = categoryByKey.get(CATEGORY_KEY.BUNDLES);
+  const catMachineMaintenance = categoryByKey.get(CATEGORY_KEY.MACHINE_MAINTENANCE);
 
-  if (!catHairClippers || !catFoilShavers || !catTrimmers || !catFacialCare || !catWaxHairRemoval || !catHairCare || !catStyling || !catAfterShave) {
-    throw new Error("Missing one or more categories (seed integrity error).");
+  const requiredCategoryKeys = [
+    CATEGORY_KEY.HAIR_CLIPPERS,
+    CATEGORY_KEY.FOIL_SHAVERS,
+    CATEGORY_KEY.TRIMMERS,
+    CATEGORY_KEY.HAIR_DRYERS_BLOWERS,
+    CATEGORY_KEY.ELECTRIC_HAIR_STYLERS,
+    CATEGORY_KEY.FACIAL_CARE,
+    CATEGORY_KEY.WAX_HAIR_REMOVAL,
+    CATEGORY_KEY.HAIR_CARE,
+    CATEGORY_KEY.STYLING_PRODUCTS,
+    CATEGORY_KEY.BEARD_AFTER_SHAVE,
+    CATEGORY_KEY.BUNDLES,
+    CATEGORY_KEY.MACHINE_MAINTENANCE,
+  ];
+
+  const missingCategoryKeys = requiredCategoryKeys.filter((key) => !categoryByKey.get(key));
+  if (missingCategoryKeys.length > 0) {
+    throw new Error(`Missing categories (seed integrity error): ${missingCategoryKeys.join(", ")}`);
   }
 
   const productsInput = [
@@ -611,7 +1023,7 @@ async function createProducts(categories) {
         shortDescAr: "ماكينة KM-1848 مخصصة للتشذيب الشخصي والمناطق الحساسة، مقاومة للماء IPX7، بطارية 600mAh، تشغيل حتى 90 دقيقة، مع شاشة LCD وقاعدة شحن.",
       },
       tags: ["kemei", "body-trimmer", "intimate-trimmer", "ipx7", "waterproof", "km-1848"],
-      images: [{ url: "/uploads/seed/products/01_Kemei_KM-1848.jpeg", secureUrl: "/uploads/seed/products/01_Kemei_KM-1848.jpeg", altHe: "Kemei KM-1848 טרימר לאזורים אינטימיים", altAr: "Kemei KM-1848 ماكينة تشذيب للمناطق الحساسة", isPrimary: true, sortOrder: 0 }],
+      images: [{ url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771924264/barber-bang/photo_5829960987115719905_x_1771924263838.jpg", secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771924264/barber-bang/photo_5829960987115719905_x_1771924263838.jpg", altHe: "Kemei KM-1848 טרימר לאזורים אינטימיים", altAr: "Kemei KM-1848 ماكينة تشذيب للمناطق الحساسة", isPrimary: true, sortOrder: 0 }],
       stats: { soldCount30d: 15, ratingAvg: 4.4, ratingCount: 9, views7d: 180, cartAdds30d: 32, wishlistAdds30d: 14 },
     },
     // 2
@@ -763,7 +1175,7 @@ async function createProducts(categories) {
         shortDescAr: "ماكينة فويل احترافية 2 في 1 بثلاث سرعات وبطارية قوية وشاشة LED.",
       },
       tags: ["kemei", "foil-shaver", "km-2026", "3-speeds", "led-display", "pop-up-trimmer"],
-      images: [{ url: "/uploads/seed/products/03_Kemei_KM-2026.jpeg", secureUrl: "/uploads/seed/products/03_Kemei_KM-2026.jpeg", altHe: "Kemei KM-2026 פויל", altAr: "Kemei KM-2026 فويل", isPrimary: true, sortOrder: 0 }],
+      images: [{ url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771924790/barber-bang/photo_5829960987115719912_y_1771924790128.jpg", secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771924790/barber-bang/photo_5829960987115719912_y_1771924790128.jpg", altHe: "Kemei KM-2026 פויל", altAr: "Kemei KM-2026 فويل", isPrimary: true, sortOrder: 0 }],
       stats: { soldCount30d: 28, ratingAvg: 4.7, ratingCount: 19, views7d: 320, cartAdds30d: 64, wishlistAdds30d: 29 },
     },
     // 4
@@ -852,7 +1264,7 @@ async function createProducts(categories) {
         shortDescAr: "ماكينة فويل مقاومة للماء مع شاشة LCD وبطارية 2000mAh.",
       },
       tags: ["kemei", "foil-shaver", "km-2027", "waterproof", "lcd-display", "2000mah"],
-      images: [{ url: "/uploads/seed/products/04_Kemei_KM-2027.jpeg", secureUrl: "/uploads/seed/products/04_Kemei_KM-2027.jpeg", altHe: "Kemei KM-2027 פויל", altAr: "Kemei KM-2027 فويل", isPrimary: true, sortOrder: 0 }],
+      images: [{ url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771924760/barber-bang/photo_5829960987115719913_y_1771924759885.jpg", secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771924760/barber-bang/photo_5829960987115719913_y_1771924759885.jpg", altHe: "Kemei KM-2027 פויל", altAr: "Kemei KM-2027 فويل", isPrimary: true, sortOrder: 0 }],
       stats: { soldCount30d: 22, ratingAvg: 4.6, ratingCount: 14, views7d: 260, cartAdds30d: 48, wishlistAdds30d: 21 },
     },
     // 5
@@ -949,7 +1361,7 @@ async function createProducts(categories) {
         shortDescAr: "ماكينة حلاقة وجه KM-2028 Gold قابلة للشحن، مناسبة للحلاقة على البشرة الجافة أو الرطبة، قابلة للغسل، مع شاشة LCD وثلاث سرعات تشغيل.",
       },
       tags: ["kemei", "km-2028", "foil-shaver", "gold", "face-shaver", "wet-dry", "lcd-display", "1400mah"],
-      images: [{ url: "/uploads/seed/products/05_Kemei_KM-2028_Gold.jpeg", secureUrl: "/uploads/seed/products/05_Kemei_KM-2028_Gold.jpeg", altHe: "Kemei KM-2028 Gold מכונת גילוח פנים", altAr: "Kemei KM-2028 Gold ماكينة حلاقة وجه", isPrimary: true, sortOrder: 0 }],
+      images: [{ url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771924148/barber-bang/photo_5829960987115719914_y_1771924148205.jpg", secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771924148/barber-bang/photo_5829960987115719914_y_1771924148205.jpg", altHe: "Kemei KM-2028 Gold מכונת גילוח פנים", altAr: "Kemei KM-2028 Gold ماكينة حلاقة وجه", isPrimary: true, sortOrder: 0 }],
       stats: { soldCount30d: 16, ratingAvg: 4.5, ratingCount: 10, views7d: 200, cartAdds30d: 35, wishlistAdds30d: 16 },
     },
     // 6
@@ -1307,7 +1719,7 @@ async function createProducts(categories) {
         shortDescHe: "קולוניה אחרי גילוח בניחוח מרענן ומרגיע לעור.",
       },
       tags: ["pier-jouliet", "after-shave", "cologne", "eau-de-cologne", "fresh"],
-      images: [{ url: "/uploads/seed/products/11_PierJouliet_AfterShave.jpeg", secureUrl: "/uploads/seed/products/11_PierJouliet_AfterShave.jpeg", altHe: "After Shave Cologne", altAr: "After Shave Cologne", isPrimary: true, sortOrder: 0 }],
+      images: [{ url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771927708/barber-bang/photo_5814267292580253024_x_1771927707834.jpg", secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771927708/barber-bang/photo_5814267292580253024_x_1771927707834.jpg", altHe: "After Shave Cologne", altAr: "After Shave Cologne", isPrimary: true, sortOrder: 0 }],
       stats: { soldCount30d: 26, ratingAvg: 4.4, ratingCount: 15, views7d: 205, cartAdds30d: 42, wishlistAdds30d: 19 },
     },
     // 12
@@ -1515,7 +1927,7 @@ async function createProducts(categories) {
         shortDescAr: "واكس شعر بمظهر مطفي – تثبيت وتصفيف بدون لمعان.",
       },
       tags: ["pier-jouliet", "booster", "matte-wax", "hair-styling", "no-shine"],
-      images: [{ url: "/uploads/seed/products/13_PierJouliet_BoosterWax_100g.jpeg", secureUrl: "/uploads/seed/products/13_PierJouliet_BoosterWax_100g.jpeg", altHe: "Booster ווקס מט לשיער", altAr: "بوستر واكس شعر مطفي", isPrimary: true, sortOrder: 0 }],
+      images: [{ url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771927464/barber-bang/photo_5814267292580253027_x_1771927464310.jpg", secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771927464/barber-bang/photo_5814267292580253027_x_1771927464310.jpg", altHe: "Booster ווקס מט לשיער", altAr: "بوستر واكس شعر مطفي", isPrimary: true, sortOrder: 0 }],
       stats: { soldCount30d: 0, ratingAvg: 0, ratingCount: 0, views7d: 0, cartAdds30d: 0, wishlistAdds30d: 0 },
     },
     // 13-B
@@ -1601,7 +2013,7 @@ async function createProducts(categories) {
         shortDescAr: "طين للشعر بمظهر مطفي – تصفيف وتثبيت بدون لمعان.",
       },
       tags: ["pier-jouliet", "clay", "matte-wax", "hair-styling", "no-shine"],
-      images: [{ url: "/uploads/seed/products/10_PierJouliet_ClayWax.jpeg", secureUrl: "/uploads/seed/products/10_PierJouliet_ClayWax.jpeg", altHe: "חימר לשיער", altAr: "طين للشعر", isPrimary: true, sortOrder: 0 }],
+      images: [{ url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771927414/barber-bang/photo_5814267292580253026_x_1771927414037.jpg", secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771927414/barber-bang/photo_5814267292580253026_x_1771927414037.jpg", altHe: "חימר לשיער", altAr: "طين للشعر", isPrimary: true, sortOrder: 0 }],
       stats: { soldCount30d: 0, ratingAvg: 0, ratingCount: 0, views7d: 0, cartAdds30d: 0, wishlistAdds30d: 0 },
     },
     // 14
@@ -1696,7 +2108,7 @@ async function createProducts(categories) {
         { variantKey: "color:green", sku: "KEM-KM1735-GRN", stock: 10, attributes: [{ key: "color", type: "text", valueKey: "green", value: "Green" }] },
       ],
       tags: ["kemei", "km-1735", "fade", "grading", "brushless", "rechargeable"],
-      images: [{ url: "/uploads/seed/products/14_Kemei_KM-1735.jpeg", secureUrl: "/uploads/seed/products/14_Kemei_KM-1735.jpeg", altHe: "Kemei KM-1735 מכונת דירוג", altAr: "Kemei KM-1735 ماكينة تدريج", isPrimary: true, sortOrder: 0 }],
+      images: [{ url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771924096/barber-bang/photo_5829960987115719973_y_1771924096237.jpg", secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771924096/barber-bang/photo_5829960987115719973_y_1771924096237.jpg", altHe: "Kemei KM-1735 מכונת דירוג", altAr: "Kemei KM-1735 ماكينة تدريج", isPrimary: true, sortOrder: 0 }],
       stats: { soldCount30d: 0, ratingAvg: 0, ratingCount: 0, views7d: 0, cartAdds30d: 0, wishlistAdds30d: 0 },
     },
     // 15
@@ -1786,7 +2198,7 @@ async function createProducts(categories) {
         shortDescHe: "דגם KM-1838 מיועד לקיצוץ אישי ואזורים אינטימיים, עמיד למים בתקן IPX7, זמן עבודה של כ-90 דקות לאחר טעינה של 1.5 שעות דרך USB.",
       },
       tags: ["kemei", "body-trimmer", "km-1838", "ipx7-waterproof", "ceramic-blade", "led-light", "usb"],
-      images: [{ url: "/uploads/seed/products/15_Kemei_KM-1838.jpeg", secureUrl: "/uploads/seed/products/15_Kemei_KM-1838.jpeg", altHe: "Kemei KM-1838 טרימר גוף", altAr: "Kemei KM-1838 تريمر الجسم", isPrimary: true, sortOrder: 0 }],
+      images: [{ url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771924216/barber-bang/photo_5829960987115719906_y_1771924216393.jpg", secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771924216/barber-bang/photo_5829960987115719906_y_1771924216393.jpg", altHe: "Kemei KM-1838 טרימר גוף", altAr: "Kemei KM-1838 تريمر الجسم", isPrimary: true, sortOrder: 0 }],
       stats: { soldCount30d: 24, ratingAvg: 4.6, ratingCount: 16, views7d: 280, cartAdds30d: 52, wishlistAdds30d: 24 },
     },
     // 16
@@ -1880,7 +2292,7 @@ async function createProducts(categories) {
         { variantKey: "color:purple", sku: "KEM-KM1693-PUR", stock: 10, attributes: [{ key: "color", type: "text", valueKey: "purple", value: "Purple" }] },
       ],
       tags: ["kemei", "km-1693", "hair-trimmer", "type-c", "6-speeds", "outline-finishing"],
-      images: [{ url: "/uploads/seed/products/16_Kemei_KM-1693.jpeg", secureUrl: "/uploads/seed/products/16_Kemei_KM-1693.jpeg", altHe: "Kemei KM-1693 מכונת טרימר Type-C", altAr: "Kemei KM-1693 ماكينة تحديد Type-C", isPrimary: true, sortOrder: 0 }],
+      images: [{ url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771923922/barber-bang/photo_5829960987115719984_y_1771923921736.jpg", secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771923922/barber-bang/photo_5829960987115719984_y_1771923921736.jpg", altHe: "Kemei KM-1693 מכונת טרימר Type-C", altAr: "Kemei KM-1693 ماكينة تحديد Type-C", isPrimary: true, sortOrder: 0 }],
       stats: { soldCount30d: 14, ratingAvg: 4.3, ratingCount: 8, views7d: 175, cartAdds30d: 28, wishlistAdds30d: 13 },
     },
     // 17
@@ -1953,7 +2365,7 @@ async function createProducts(categories) {
         shortDescHe: "טרימר שיער מקצועי Kemei KM-1808 נטען, 2500mAh, עד 260 דקות, 6 מסרקים. מאושר מתמונות האריזה.",
       },
       tags: ["kemei", "km-1808", "hair-trimmer", "professional", "rechargeable", "line-up", "finishing", "engraving"],
-      images: [{ url: "/uploads/seed/products/17_Kemei_KM-1808.jpeg", secureUrl: "/uploads/seed/products/17_Kemei_KM-1808.jpeg", altHe: "Kemei KM-1808 טרימר שיער", altAr: "Kemei KM-1808 ماكينة تحديد شعر", isPrimary: true, sortOrder: 0 }],
+      images: [{ url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771923990/barber-bang/photo_5829960987115719985_y_1771923989111.jpg", secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771923990/barber-bang/photo_5829960987115719985_y_1771923989111.jpg", altHe: "Kemei KM-1808 טרימר שיער", altAr: "Kemei KM-1808 ماكينة تحديد شعر", isPrimary: true, sortOrder: 0 }],
       stats: { soldCount30d: 0, ratingAvg: 0, ratingCount: 0, views7d: 0, cartAdds30d: 0, wishlistAdds30d: 0 },
     },
     // 18
@@ -2041,7 +2453,7 @@ async function createProducts(categories) {
         shortDescHe: "מכונת תספורת מקצועית Kemei KM-1868 נטענת, להב DLC, 6000–8000 RPM, עד 120 דקות פעולה.",
       },
       tags: ["kemei", "km-1868", "hair-clipper", "trimmer", "dlc-blade", "rechargeable", "led-display"],
-      images: [{ url: "/uploads/seed/products/18_Kemei_KM-1868_Clipper.jpeg", secureUrl: "/uploads/seed/products/18_Kemei_KM-1868_Clipper.jpeg", altHe: "Kemei KM-1868 מכונת תספורת", altAr: "Kemei KM-1868 ماكينة حلاقة", isPrimary: true, sortOrder: 0 }],
+      images: [{ url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771924296/barber-bang/photo_5829960987115719904_y_1771924296380.jpg", secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771924296/barber-bang/photo_5829960987115719904_y_1771924296380.jpg", altHe: "Kemei KM-1868 מכונת תספורת", altAr: "Kemei KM-1868 ماكينة حلاقة", isPrimary: true, sortOrder: 0 }],
       stats: { soldCount30d: 19, ratingAvg: 4.5, ratingCount: 12, views7d: 220, cartAdds30d: 38, wishlistAdds30d: 18 },
     },
     // 19
@@ -2126,7 +2538,7 @@ async function createProducts(categories) {
         shortDescHe: "טרימר מקצועי במהירות גבוהה 9000RPM, להב DLC, סוללה 2500mAh וזמן עבודה עד 180 דקות עם מעמד טעינה.",
       },
       tags: ["kemei", "km-1867", "hair-trimmer", "professional", "dlc-blade", "rechargeable", "lcd-display"],
-      images: [{ url: "/uploads/seed/products/19_Kemei_KM-1867.jpeg", secureUrl: "/uploads/seed/products/19_Kemei_KM-1867.jpeg", altHe: "Kemei KM-1867 טרימר", altAr: "Kemei KM-1867 ماكينة تحديد", isPrimary: true, sortOrder: 0 }],
+      images: [{ url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771924031/barber-bang/photo_5829960987115719976_y_1771924030771.jpg", secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771924031/barber-bang/photo_5829960987115719976_y_1771924030771.jpg", altHe: "Kemei KM-1867 טרימר", altAr: "Kemei KM-1867 ماكينة تحديد", isPrimary: true, sortOrder: 0 }],
       stats: { soldCount30d: 0, ratingAvg: 0, ratingCount: 0, views7d: 0, cartAdds30d: 0, wishlistAdds30d: 0 },
     },
     // 20
@@ -2138,7 +2550,7 @@ async function createProducts(categories) {
       descriptionAr:
         "مجموعة كيراتين متكاملة للعناية بالشعر الجاف/المصبوغ/التالف. تضم 3 منتجات بحجم 500 مل لكل منتج، لتوفير روتين عناية كامل يساعد على تنظيف الشعر بلطف، ترطيب وتنعيم الخصلات، ودعم مظهر أكثر صحة ولمعاناً. مناسبة للاستخدام اليومي أو حسب الحاجة، وتعد خياراً عملياً واقتصادياً لمن يريد نتائج واضحة ضمن مجموعة واحدة.",
       stock: 60,
-      categoryId: catHairCare._id,
+      categoryId: catBundles._id,
       brand: "Pier Jouliet",
       sku: "PJ-KERATIN-KIT-3X500ML",
       price: 270.0,
@@ -2231,8 +2643,8 @@ async function createProducts(categories) {
       tags: ["pier-jouliet", "keratin", "hair-care", "kit", "bundle", "3x500ml", "dry-hair", "colored-hair", "damaged-hair"],
       images: [
         {
-          url: "/uploads/seed/categories/hair-care.jpg",
-          secureUrl: "/uploads/seed/categories/hair-care.jpg",
+          url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771925378/barber-bang/photo_5814267292580253006_x__2__1771925378197.jpg",
+          secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771925378/barber-bang/photo_5814267292580253006_x__2__1771925378197.jpg",
           altHe: "מארז קרטין לשיער",
           altAr: "مجموعة كيراتين للشعر",
           isPrimary: true,
@@ -2251,7 +2663,7 @@ async function createProducts(categories) {
         "مجموعة العناية المثالية للشعر واللحية لروتين يومي مرتب وسهل. تحتوي المجموعة على مشط خشبي عالي الجودة وفرشاة مخصصة لتصفيف وتمشيط يومي، بالإضافة إلى شامبو للرجال للتنظيف والانتعاش، وزيت وكريم للّحية مدعّمين بالزيوت والفيتامينات. يعمل هذا المزيج على منح نعومة ولمعاناً وتصفيفاً طبيعياً ومظهراً أكثر عناية، مع دعم صحة الجلد والشعر—بدون إحساس دهني، وبنتائج يمكن ملاحظتها يوماً بعد يوم.",
       price: 260.0,
       stock: 50,
-      categoryId: catHairCare._id,
+      categoryId: catBundles._id,
       brand: "Pier Jouliet",
       sku: "PJ-MEN-GROOMING-KIT-5PCS",
       unit: "set",
@@ -2351,8 +2763,8 @@ async function createProducts(categories) {
       ],
       images: [
         {
-          url: "/uploads/seed/categories/hair-care.jpg",
-          secureUrl: "/uploads/seed/categories/hair-care.jpg",
+          url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771925501/barber-bang/photo_5814267292580253028_x_1771925500823.jpg",
+          secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771925501/barber-bang/photo_5814267292580253028_x_1771925500823.jpg",
           altHe: "מארז מפנק לגבר",
           altAr: "مجموعة عناية فاخرة للرجل",
           isPrimary: true,
@@ -2371,7 +2783,7 @@ async function createProducts(categories) {
         "زيت للّحية والشارب من بيير جولييت يمتصه الشعر بسرعة ولا يترك إحساساً دهنياً. غني بالزيوت والفيتامينات التي تساعد في الحفاظ على صحة الجلد والشعر. يمنح الشعر لمعاناً، ينعّمه ويغذّيه، ويدعم حيوية بشرة الوجه. مناسب للاستخدام اليومي للحصول على مظهر مرتب وناعم ومعتنى به للّحية والشارب.",
       price: 90.0,
       stock: 90,
-      categoryId: catHairCare._id,
+      categoryId: catAfterShave._id,
       brand: "Pier Jouliet",
       sku: "PJ-BEARD-MUSTACHE-OIL-50ML",
       unit: "ml",
@@ -2455,8 +2867,8 @@ async function createProducts(categories) {
       ],
       images: [
         {
-          url: "/uploads/seed/categories/hair-care.jpg",
-          secureUrl: "/uploads/seed/categories/hair-care.jpg",
+          url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771925555/barber-bang/photo_5814267292580253022_x_1771925554635.jpg",
+          secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771925555/barber-bang/photo_5814267292580253022_x_1771925554635.jpg",
           altHe: "שמן לזקן ולשפם",
           altAr: "زيت للّحية والشارب",
           isPrimary: true,
@@ -2564,8 +2976,8 @@ async function createProducts(categories) {
       ],
       images: [
         {
-          url: "/uploads/seed/categories/facial-care.jpg",
-          secureUrl: "/uploads/seed/categories/facial-care.jpg",
+          url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771927129/barber-bang/photo_5814267292580253025_x__2__1771927128822.jpg",
+          secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771927129/barber-bang/photo_5814267292580253025_x__2__1771927128822.jpg",
           altHe: "שעווה להסרת שיער",
           altAr: "شمع لإزالة الشعر",
           isPrimary: true,
@@ -2676,8 +3088,8 @@ async function createProducts(categories) {
       ],
       images: [
         {
-          url: "/uploads/seed/categories/facial-care.jpg",
-          secureUrl: "/uploads/seed/categories/facial-care.jpg",
+          url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771927199/barber-bang/photo_5814267292580253007_x__2__1771927199286.jpg",
+          secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771927199/barber-bang/photo_5814267292580253007_x__2__1771927199286.jpg",
           altHe: "שעווה לכל חלקי הגוף",
           altAr: "شمع لجميع مناطق الجسم",
           isPrimary: true,
@@ -2800,7 +3212,7 @@ async function createProducts(categories) {
         "سبراي صيانة وتعقيم لماكينات قص الشعر والحلاقة – “4 وظائف”، مخصص للاستخدام على شفرات ماكينات القص والحلاقة وعلى أمشاط الشعر. يوفر عناية شاملة: تشحيم للحفاظ على الشفرات والمحرك وتقليل التآكل ومنع الصدأ، تنظيف بضغط الرذاذ لإزالة الشعر وبقايا القص من الشفرة، تعقيم كامل لاحتوائه على الكحول، وتبريد للشفرة عند سخونتها بسبب الضغط أو الاستخدام المكثف. حل عملي للحفاظ على أداء الماكينة ونظافتها وإطالة عمر الشفرات.",
       price: 60.0,
       stock: 120,
-      categoryId: catHairClippers._id,
+      categoryId: catMachineMaintenance._id,
       brand: "Barber Care",
       sku: "PJ-CLIPPER-BLADE-SPRAY-4IN1",
       unit: "ml",
@@ -2875,7 +3287,7 @@ async function createProducts(categories) {
         shortDescAr: "سبراي 4-في-1 للشفرات: تشحيم، تنظيف، تعقيم وتبريد – لماكينات الحلاقة وقص الشعر.",
       },
       tags: ["clipper-spray", "blade-maintenance", "4-in-1", "barber-accessories", "disinfection", "cooling"],
-      images: [{ url: "/uploads/seed/categories/hair-clippers.jpg", secureUrl: "/uploads/seed/categories/hair-clippers.jpg", altHe: "ספריי חיטוי למכונות תספורת", altAr: "سبراي تعقيم لماكينات الحلاقة", isPrimary: true, sortOrder: 0 }],
+      images: [{ url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771927324/barber-bang/photo_5814267292580253010_x_1771927324336.jpg", secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771927324/barber-bang/photo_5814267292580253010_x_1771927324336.jpg", altHe: "ספריי חיטוי למכונות תספורת", altAr: "سبراي تعقيم لماكينات الحلاقة", isPrimary: true, sortOrder: 0 }],
       stats: { soldCount30d: 0, ratingAvg: 0, ratingCount: 0, views7d: 0, cartAdds30d: 0, wishlistAdds30d: 0 },
     },
     // 27
@@ -2888,7 +3300,7 @@ async function createProducts(categories) {
         "منفاخ/كمبروسر PUMAS Blizzard هو الحل المثالي لتنظيف محطة العمل بسرعة وكفاءة وبشكل مريح. يوفر تدفق هواء قوي جداً مع فوهة دقيقة تتيح إزالة الشعر والغبار وبقايا القص بضغطة واحدة. يأتي بتصميم مدمج ومريح (أرجونومي) يمنح قبضة سهلة ويسمح بالاستخدام لفترات طويلة دون تعب. بفضل محرك قوي وثابت، يقدم Blizzard أداءً ثابتاً وتدفق هواء قوياً في كل استخدام، للحفاظ على بيئة عمل نظيفة وصحية واحترافية.",
       price: 300.0,
       stock: 25,
-      categoryId: catHairClippers._id,
+      categoryId: catHairDryersBlowers._id,
       brand: "PUMAS",
       sku: "PUMAS-BLIZZARD-COMPRESSOR",
       catalogStatus: "READY_WITH_EDITS",
@@ -2961,8 +3373,8 @@ async function createProducts(categories) {
       tags: ["pumas", "blizzard", "compressor", "blower", "barber-accessories", "workstation-cleaning"],
       images: [
         {
-          url: "/uploads/seed/categories/hair-clippers.jpg",
-          secureUrl: "/uploads/seed/categories/hair-clippers.jpg",
+          url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771926448/barber-bang/photo_5814267292580253009_x_1771926447797.jpg",
+          secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771926448/barber-bang/photo_5814267292580253009_x_1771926447797.jpg",
           altHe: "PUMAS Blizzard מפוח קומפרסור",
           altAr: "منفاخ PUMAS Blizzard",
           isPrimary: true,
@@ -2981,7 +3393,7 @@ async function createProducts(categories) {
         "مجفف شعر احترافي وقوي Pumas Cyclone مزوّد بمحرك BLDC عالي الأداء بسرعة 21,000 دورة/دقيقة (rpm)، يمنح تدفق هواء قوي جداً لتجفيف أسرع وأكثر كفاءة. يتميز بعمر محرك طويل يصل إلى 3 أضعاف المحركات التقليدية وحتى 3,000 ساعة تشغيل، ما يوفر أداءً ثابتاً على المدى الطويل. يعمل بهدوء نسبي مع وزن أخف حتى 44% مقارنة بمجفف عادي، ويأتي بمقبض مريح (أرجونومي) لثبات أفضل أثناء الاستخدام. يتضمن فوهتين لتركيز الحرارة لتصفيف أدق، مع سلك مرن بطول 3 أمتار لحرية حركة ممتازة في محطة العمل.",
       price: 500.0,
       stock: 20,
-      categoryId: catHairClippers._id,
+      categoryId: catHairDryersBlowers._id,
       brand: "PUMAS",
       sku: "PUMAS-CYCLONE-BLDC-21000",
       catalogStatus: "READY_WITH_EDITS",
@@ -3063,8 +3475,8 @@ async function createProducts(categories) {
       tags: ["pumas", "cyclone", "hair-dryer", "bldc", "21000rpm", "professional-hair-device"],
       images: [
         {
-          url: "/uploads/seed/categories/hair-clippers.jpg",
-          secureUrl: "/uploads/seed/categories/hair-clippers.jpg",
+          url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771926513/barber-bang/photo_5814267292580253014_x_1771926512921.jpg",
+          secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771926513/barber-bang/photo_5814267292580253014_x_1771926512921.jpg",
           altHe: "מייבש שיער Pumas Cyclone",
           altAr: "مجفف شعر Pumas Cyclone",
           isPrimary: true,
@@ -3083,7 +3495,7 @@ async function createProducts(categories) {
         "مجفف شعر ميني للسفر بحجم صغير ووزن خفيف، مثالي للحقيبة وللاستخدام خارج المنزل. يأتي بسرعتين تشغيل وبوضعين للحرارة لتعديل الأداء حسب نوع الشعر والنتيجة المطلوبة. بقدرة 1100W لتجفيف فعّال ضمن حجم مدمج، ويتضمن فوهة لتركيز الهواء وديفيوزر لتوزيع الهواء بلطف ولمظهر تصفيف طبيعي.",
       price: 100.0,
       stock: 45,
-      categoryId: catHairClippers._id,
+      categoryId: catHairDryersBlowers._id,
       brand: "PUMAS",
       sku: "PUMAS-MINI-TRAVEL-DRYER-1100W",
       catalogStatus: "READY_WITH_EDITS",
@@ -3163,8 +3575,8 @@ async function createProducts(categories) {
       tags: ["pumas", "mini-dryer", "travel-hair-dryer", "1100w", "diffuser", "compact"],
       images: [
         {
-          url: "/uploads/seed/categories/hair-clippers.jpg",
-          secureUrl: "/uploads/seed/categories/hair-clippers.jpg",
+          url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771926376/barber-bang/photo_5814267292580253016_x_1771926375964.jpg",
+          secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771926376/barber-bang/photo_5814267292580253016_x_1771926375964.jpg",
           altHe: "מייבש שיער מיני לנסיעות",
           altAr: "مجفف شعر ميني للسفر",
           isPrimary: true,
@@ -3183,7 +3595,7 @@ async function createProducts(categories) {
         "مجفف شعر (سشوار) تيفوني Tifone من السلسلة الاحترافية من Pumas. يتميز بتصميم صغير ومريح (أرجونومي) مع محرك قوي بقدرة 2500W يوفر هواءً ساخناً جداً لتجفيف سريع ونتائج احترافية. يحتوي على زر هواء بارد فوري (Cool Shot) لتثبيت التسريحة وتحكم أفضل أثناء الاستخدام. صناعة إيطالية، مناسب للاستخدام المهني في الصالون أو لمن يريد مجففاً قوياً وموثوقاً في المنزل.",
       price: 580.0,
       stock: 18,
-      categoryId: catHairClippers._id,
+      categoryId: catHairDryersBlowers._id,
       brand: "PUMAS",
       sku: "PUMAS-TIFONE-2500W",
       catalogStatus: "READY_WITH_EDITS",
@@ -3259,8 +3671,8 @@ async function createProducts(categories) {
       tags: ["pumas", "tifone", "hair-dryer", "2500w", "cool-shot", "made-in-italy"],
       images: [
         {
-          url: "/uploads/seed/categories/hair-clippers.jpg",
-          secureUrl: "/uploads/seed/categories/hair-clippers.jpg",
+          url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771926586/barber-bang/photo_5814267292580253013_x_1771926586336.jpg",
+          secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771926586/barber-bang/photo_5814267292580253013_x_1771926586336.jpg",
           altHe: "פן Pumas Tifone",
           altAr: "مجفف Pumas Tifone",
           isPrimary: true,
@@ -3279,7 +3691,7 @@ async function createProducts(categories) {
         "مجفف شعر (سشوار) تورنادو Pumas Tornado الاحترافي من Pumas. مزوّد بمحرك قوي بقدرة 2500W يوفر تدفق هواء قوي لتجفيف سريع ونتائج احترافية. يحتوي على زر هواء بارد فوري (Cool Shot) لتثبيت التسريحة وتحكم أفضل أثناء الاستخدام. صناعة إيطالية، مناسب للصالونات والاستخدام المنزلي لمن يبحث عن أداء قوي وموثوق.",
       price: 500.0,
       stock: 20,
-      categoryId: catHairClippers._id,
+      categoryId: catHairDryersBlowers._id,
       brand: "PUMAS",
       sku: "PUMAS-TORNADO-2500W",
       catalogStatus: "READY_WITH_EDITS",
@@ -3355,8 +3767,8 @@ async function createProducts(categories) {
       tags: ["pumas", "tornado", "hair-dryer", "2500w", "cool-shot", "made-in-italy"],
       images: [
         {
-          url: "/uploads/seed/categories/hair-clippers.jpg",
-          secureUrl: "/uploads/seed/categories/hair-clippers.jpg",
+          url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771926618/barber-bang/photo_5814267292580253012_x_1771926618432.jpg",
+          secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771926618/barber-bang/photo_5814267292580253012_x_1771926618432.jpg",
           altHe: "פן Pumas Tornado",
           altAr: "مجفف Pumas Tornado",
           isPrimary: true,
@@ -3375,7 +3787,7 @@ async function createProducts(categories) {
         "فرشاة شعر كهربائية احترافية تساعد على تجفيف وتصفيف الشعر بسرعة أكبر، ما يقلل مدة التعرض للحرارة ويساهم في تقليل ضرر الشعر. تدعم التجفيف السريع وتساعد على تقليل الهيشان والكهرباء الساكنة، لتمنح الشعر ملمساً أنعم ولمعاناً أفضل. تتميز بسطح سيراميك عالي الجودة يوزّع الحرارة بشكل متساوٍ على كامل الفرشاة، بينما تعمل الأيونات السلبية على إحاطة الشعرة وتقليل الشحنات الساكنة والهيشان للحصول على نتيجة أكثر نعومة وترتيباً.",
       price: 200.0,
       stock: 35,
-      categoryId: catHairClippers._id,
+      categoryId: catElectricHairStylers._id,
       brand: "PUMAS",
       sku: "PUMAS-ELECTRIC-HAIR-BRUSH-CERAMIC-ION",
       catalogStatus: "READY_WITH_EDITS",
@@ -3450,8 +3862,8 @@ async function createProducts(categories) {
       tags: ["pumas", "electric-hair-brush", "ceramic", "negative-ions", "anti-frizz", "hair-styling"],
       images: [
         {
-          url: "/uploads/seed/categories/hair-clippers.jpg",
-          secureUrl: "/uploads/seed/categories/hair-clippers.jpg",
+          url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771927040/barber-bang/photo_5814267292580253008_x_1771927039745.jpg",
+          secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771927040/barber-bang/photo_5814267292580253008_x_1771927039745.jpg",
           altHe: "מברשת שיער חשמלית",
           altAr: "فرشاة شعر كهربائية",
           isPrimary: true,
@@ -3550,8 +3962,8 @@ async function createProducts(categories) {
       tags: ["pumas", "r75", "nose-trimmer", "ear-trimmer", "usb-rechargeable", "metal-body"],
       images: [
         {
-          url: "/uploads/seed/categories/trimmers.jpg",
-          secureUrl: "/uploads/seed/categories/trimmers.jpg",
+          url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771925806/barber-bang/photo_5814267292580253018_x_1771925806080.jpg",
+          secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771925806/barber-bang/photo_5814267292580253018_x_1771925806080.jpg",
           altHe: "קוצץ Pumas R75 לאף ולאוזן",
           altAr: "ماكينة Pumas R75 للأنف والأذن",
           isPrimary: true,
@@ -3659,8 +4071,8 @@ async function createProducts(categories) {
       tags: ["wahl", "kuno", "professional-clipper", "7200rpm", "magnetic-combs", "corded-cordless"],
       images: [
         {
-          url: "/uploads/seed/categories/hair-clippers.jpg",
-          secureUrl: "/uploads/seed/categories/hair-clippers.jpg",
+          url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771925886/barber-bang/photo_5814267292580253017_x_1771925886141.jpg",
+          secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771925886/barber-bang/photo_5814267292580253017_x_1771925886141.jpg",
           altHe: "WAHL KUNO מכונת תספורת מקצועית",
           altAr: "WAHL KUNO ماكينة قص احترافية",
           isPrimary: true,
@@ -3760,8 +4172,8 @@ async function createProducts(categories) {
       tags: ["pumas", "m2500r", "barber-clipper", "10000rpm", "2500mah", "magnetic-motor", "professional"],
       images: [
         {
-          url: "/uploads/seed/categories/hair-clippers.jpg",
-          secureUrl: "/uploads/seed/categories/hair-clippers.jpg",
+          url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771925735/barber-bang/photo_5814267292580253021_x__1__1771925735155.jpg",
+          secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771925735/barber-bang/photo_5814267292580253021_x__1__1771925735155.jpg",
           altHe: "Pumas M2500R מכונת תספורת בארבר",
           altAr: "Pumas M2500R ماكينة قص باربر",
           isPrimary: true,
@@ -3780,7 +4192,7 @@ async function createProducts(categories) {
         "طقم احترافي من WAHL يضم ماكينة قص Cordless Super Taper وتريمر Beret Stealth، وكلاهما يدعم الاستخدام اللاسلكي والسلكي (Cord/Cordless) للعمل المتواصل في الصالون/الباربر. ماكينة Cordless Super Taper تأتي بمحرك DC بسرعة 5,500 دورة/دقيقة، وبطارية ليثيوم-أيون بزمن تشغيل لا يقل عن 100 دقيقة وزمن شحن حوالي 120 دقيقة. تحتوي على شفرات كروم ثابتة مع ذراع لتغيير الارتفاع، طول قص 1–2 مم وعرض قص 46 مم. أما تريمر Beret Stealth فيأتي بمحرك DC بسرعة 6,000 دورة/دقيقة، وبطارية ليثيوم-أيون بزمن تشغيل لا يقل عن 75 دقيقة وزمن شحن حوالي 60 دقيقة. مزوّد بشفرات كروم سوداء مع تبديل سريع، طول قص 0.4 مم وعرض قص 32.5 مم. اختيار ممتاز لباقة عمل كاملة تجمع بين قص الشعر الرئيسي والتحديدات الدقيقة وخطوط الحواف.",
       price: 750.0,
       stock: 10,
-      categoryId: catHairClippers._id,
+      categoryId: catBundles._id,
       brand: "WAHL",
       sku: "WAHL-KIT-SUPERTAPER-BERET-08592-017H",
       catalogStatus: "READY_WITH_EDITS",
@@ -3877,8 +4289,8 @@ async function createProducts(categories) {
       tags: ["wahl", "barber-kit", "super-taper", "beret-stealth", "08592-017h", "corded-cordless", "professional-set"],
       images: [
         {
-          url: "/uploads/seed/categories/hair-clippers.jpg",
-          secureUrl: "/uploads/seed/categories/hair-clippers.jpg",
+          url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771926117/barber-bang/photo_5814267292580253020_x__1__1771926116604.jpg",
+          secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771926117/barber-bang/photo_5814267292580253020_x__1__1771926116604.jpg",
           altHe: "סט WAHL מקצועי - Super Taper + Beret Stealth",
           altAr: "طقم WAHL احترافي - Super Taper + Beret Stealth",
           isPrimary: true,
@@ -3900,7 +4312,7 @@ async function createProducts(categories) {
       saleStartAt: nowPlusDays(-1),
       saleEndAt: nowPlusDays(30),
       stock: 14,
-      categoryId: catTrimmers._id,
+      categoryId: catBundles._id,
       brand: "Pumas",
       sku: "PUM-BUNDLE-155R-300R-75R",
       unit: "set",
@@ -3983,8 +4395,8 @@ async function createProducts(categories) {
       tags: ["pumas", "bundle", "155r", "300r", "r75", "barber-kit", "grooming-kit"],
       images: [
         {
-          url: "/uploads/seed/categories/trimmers.jpg",
-          secureUrl: "/uploads/seed/categories/trimmers.jpg",
+          url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771926211/barber-bang/photo_5814267292580253019_x_1771926210889.jpg",
+          secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771926211/barber-bang/photo_5814267292580253019_x_1771926210889.jpg",
           altHe: "באנדל מכונות Pumas 155R + 300R + 75R",
           altAr: "باقة ماكينات Pumas 155R + 300R + 75R",
           isPrimary: true,
@@ -4079,8 +4491,8 @@ async function createProducts(categories) {
       tags: ["smart-wax-heater", "wax-heater", "hair-removal", "digital-control", "temperature-sensor", "beauty-device"],
       images: [
         {
-          url: "/uploads/seed/categories/facial-care.jpg",
-          secureUrl: "/uploads/seed/categories/facial-care.jpg",
+          url: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771927252/barber-bang/photo_5814267292580253011_x_1771927251632.jpg",
+          secureUrl: "https://res.cloudinary.com/dvcpd6tye/image/upload/v1771927252/barber-bang/photo_5814267292580253011_x_1771927251632.jpg",
           altHe: "מכשיר לחימום שעווה",
           altAr: "جهاز تسخين الشمع",
           isPrimary: true,
@@ -4097,9 +4509,54 @@ async function createProducts(categories) {
     const slug = slugFromSku(p.sku) || undefined;
     const priceMinor = toMinorSafe(p.price);
     const salePriceMinor = p.salePrice != null ? toMinorSafe(p.salePrice) : null;
+    const resolvedCategoryKey = resolveProductCategoryKey(p);
+
+    if (!resolvedCategoryKey) {
+      throw new Error(`Could not resolve category for product SKU ${p.sku}`);
+    }
+
+    const resolvedCategory = categoryByKey.get(resolvedCategoryKey);
+    if (!resolvedCategory) {
+      throw new Error(`Resolved category key '${resolvedCategoryKey}' is missing for SKU ${p.sku}`);
+    }
+
+    const orderedKeys = [...NON_DEVICE_CATEGORY_PRIORITY, ...DEVICE_CATEGORY_PRIORITY];
+    const declaredPrimaryKey = detectCategoryKey(p?.classification?.categoryPrimary || "", orderedKeys);
+
+    const legacyCategoryId = p?.categoryId ? String(p.categoryId) : "";
+    const resolvedCategoryId = String(resolvedCategory._id);
+    const clipperCategoryId = String(catHairClippers?._id || "");
+
+    if (declaredPrimaryKey && declaredPrimaryKey !== resolvedCategoryKey) {
+      console.warn(
+        `⚠️ Primary classification/categoryId mismatch for ${p.sku}: categoryPrimary=${p.classification?.categoryPrimary} -> ${declaredPrimaryKey}, resolved=${resolvedCategoryKey}`
+      );
+    }
+
+    if (legacyCategoryId && legacyCategoryId !== resolvedCategoryId) {
+      console.warn(
+        `⚠️ categoryId mismatch for ${p.sku}: inputCategoryId=${legacyCategoryId}, resolvedCategoryId=${resolvedCategoryId} (${resolvedCategoryKey})`
+      );
+    }
+
+    if (resolvedCategoryKey === CATEGORY_KEY.HAIR_DRYERS_BLOWERS && legacyCategoryId === clipperCategoryId) {
+      console.warn(`⚠️ Guard: ${p.sku} is Hair Dryer/Blower and cannot remain under Hair Clippers.`);
+    }
+    if (resolvedCategoryKey === CATEGORY_KEY.ELECTRIC_HAIR_STYLERS && legacyCategoryId === clipperCategoryId) {
+      console.warn(`⚠️ Guard: ${p.sku} is Electric Hair Styler and cannot remain under Hair Clippers.`);
+    }
+
+    const classification = {
+      ...(p.classification || {}),
+      categoryPrimary: CATEGORY_PRIMARY_BY_KEY[resolvedCategoryKey] || p?.classification?.categoryPrimary || "",
+      categorySecondary:
+        p?.classification?.categorySecondary || CATEGORY_SECONDARY_BY_KEY[resolvedCategoryKey] || "",
+    };
 
     return {
       ...p,
+      categoryId: resolvedCategory._id,
+      classification,
       slug,
       priceMinor,
       salePriceMinor,
@@ -4388,8 +4845,8 @@ async function createPromos(products, categories) {
   console.log("🏷️ Creating promos (coupons/campaigns/offers/gifts)...");
 
   const bySku = new Map(products.map((p) => [p.sku, p]));
-  const catStyling = categories.find((c) => c.nameAr === "تصفيف الشعر");
-  const catFoil = categories.find((c) => c.nameAr === "ماكينات فويل للحلاقة");
+  const catStyling = categories.find((c) => c.nameAr === CATEGORY_AR_BY_KEY[CATEGORY_KEY.STYLING_PRODUCTS]);
+  const catFoil = categories.find((c) => c.nameAr === CATEGORY_AR_BY_KEY[CATEGORY_KEY.FOIL_SHAVERS]);
 
   const shampoo = bySku.get("PJ-ANTI-DANDRUFF-500ML");
   const booster = bySku.get("PJ-BOOSTER-MATTE-100G");

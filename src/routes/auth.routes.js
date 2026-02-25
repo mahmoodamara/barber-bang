@@ -6,7 +6,12 @@ import crypto from "node:crypto";
 import { requireAuth } from "../middleware/auth.js";
 import { getRequestId } from "../middleware/error.js";
 import { validate } from "../middleware/validate.js";
-import { limitLogin, limitRegister, limitAuthGeneral, limitForgotPassword } from "../middleware/rateLimit.js";
+import {
+  limitLogin,
+  limitRegister,
+  limitAuthGeneral,
+  limitForgotPassword,
+} from "../middleware/rateLimit.js";
 import { User } from "../models/User.js";
 import { PasswordResetToken } from "../models/PasswordResetToken.js";
 import { EmailVerificationToken } from "../models/EmailVerificationToken.js";
@@ -23,7 +28,9 @@ router.use((req, res, next) => {
 });
 
 function normalizeEmail(email) {
-  return String(email || "").toLowerCase().trim();
+  return String(email || "")
+    .toLowerCase()
+    .trim();
 }
 
 function errorPayload(req, code, message) {
@@ -43,8 +50,14 @@ function okPayload(data = {}) {
   return { ok: true, success: true, data };
 }
 
-const LOGIN_MAX_ATTEMPTS = Math.max(3, Number(process.env.LOGIN_MAX_ATTEMPTS) || 5);
-const LOGIN_LOCKOUT_MINUTES = Math.max(5, Number(process.env.LOGIN_LOCKOUT_MINUTES) || 15);
+const LOGIN_MAX_ATTEMPTS = Math.max(
+  3,
+  Number(process.env.LOGIN_MAX_ATTEMPTS) || 5,
+);
+const LOGIN_LOCKOUT_MINUTES = Math.max(
+  5,
+  Number(process.env.LOGIN_LOCKOUT_MINUTES) || 15,
+);
 
 /**
  * Record failed login attempt; returns { incrementLoginAttempts, isLocked }.
@@ -67,7 +80,7 @@ async function recordFailedLogin(userId) {
         loginAttempts: attempts,
         ...(lockoutUntil ? { lockoutUntil } : {}),
       },
-    }
+    },
   );
 
   return {
@@ -103,18 +116,56 @@ const registerSchema = z.object({
  * When data.user === null, client must not access data.user (e.g. data.user.name); show generic
  * "Please sign in" and redirect to login.
  */
-router.post("/register", limitRegister, validate(registerSchema), async (req, res) => {
-  const startAt = Date.now();
-  const { name, email, password } = req.validated.body;
+router.post(
+  "/register",
+  limitRegister,
+  validate(registerSchema),
+  async (req, res) => {
+    const startAt = Date.now();
+    const { name, email, password } = req.validated.body;
 
-  const safeEmail = normalizeEmail(email);
+    const safeEmail = normalizeEmail(email);
 
-  const exists = await User.findOne({ email: safeEmail }).select("_id");
-  if (exists) {
-    // Prevent account enumeration: return generic success. Client must not access data.user
-    // when data.user === null; use data.requiresLogin to show "Please sign in" and redirect.
+    const exists = await User.findOne({ email: safeEmail }).select("_id");
+    if (exists) {
+      // Prevent account enumeration: return generic success. Client must not access data.user
+      // when data.user === null; use data.requiresLogin to show "Please sign in" and redirect.
+      const rounds = Number(process.env.BCRYPT_ROUNDS || 10);
+      await bcrypt.hash(password, rounds);
+
+      const minDelayMs = Number(process.env.REGISTER_MIN_DELAY_MS || 200);
+      const elapsed = Date.now() - startAt;
+      if (elapsed < minDelayMs) {
+        await new Promise((r) => setTimeout(r, minDelayMs - elapsed));
+      }
+
+      return res.json(
+        okPayload({
+          token: null,
+          user: null,
+          requiresLogin: true, // client: do not use user; show "Please sign in" and redirect
+        }),
+      );
+    }
+
     const rounds = Number(process.env.BCRYPT_ROUNDS || 10);
-    await bcrypt.hash(password, rounds);
+    const passwordHash = await bcrypt.hash(password, rounds);
+
+    const user = await User.create({
+      name: String(name).trim(),
+      email: safeEmail,
+      passwordHash,
+      role: "user",
+    });
+
+    const tokenPayload = {
+      sub: user._id.toString(),
+      userId: user._id.toString(), // backward compatible
+      role: user.role,
+      tokenVersion: user.tokenVersion || 0,
+    };
+    const token = signToken(tokenPayload);
+    const refreshToken = signRefreshToken(tokenPayload);
 
     const minDelayMs = Number(process.env.REGISTER_MIN_DELAY_MS || 200);
     const elapsed = Date.now() - startAt;
@@ -124,52 +175,21 @@ router.post("/register", limitRegister, validate(registerSchema), async (req, re
 
     return res.json(
       okPayload({
-        token: null,
-        user: null,
-        requiresLogin: true, // client: do not use user; show "Please sign in" and redirect
-      })
+        token,
+        refreshToken,
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          wholesaleTier: user.wholesaleTier || "none",
+          b2bApproved: Boolean(user.b2bApproved),
+        },
+        expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || "15m",
+      }),
     );
-  }
-
-  const rounds = Number(process.env.BCRYPT_ROUNDS || 10);
-  const passwordHash = await bcrypt.hash(password, rounds);
-
-  const user = await User.create({
-    name: String(name).trim(),
-    email: safeEmail,
-    passwordHash,
-    role: "user",
-  });
-
-  const tokenPayload = {
-    sub: user._id.toString(),
-    userId: user._id.toString(), // backward compatible
-    role: user.role,
-    tokenVersion: user.tokenVersion || 0,
-  };
-  const token = signToken(tokenPayload);
-  const refreshToken = signRefreshToken(tokenPayload);
-
-  const minDelayMs = Number(process.env.REGISTER_MIN_DELAY_MS || 200);
-  const elapsed = Date.now() - startAt;
-  if (elapsed < minDelayMs) {
-    await new Promise((r) => setTimeout(r, minDelayMs - elapsed));
-  }
-
-  return res.json(
-    okPayload({
-      token,
-      refreshToken,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-      },
-      expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || "15m",
-    })
-  );
-});
+  },
+);
 
 // Login keeps min(1) to not break existing users with old passwords
 const loginSchema = z.object({
@@ -188,42 +208,62 @@ router.post("/login", limitLogin, validate(loginSchema), async (req, res) => {
   const rounds = Number(process.env.BCRYPT_ROUNDS || 10);
 
   const user = await User.findOne({ email: safeEmail }).select(
-    "_id name email role tokenVersion isBlocked passwordHash loginAttempts lockoutUntil"
+    "_id name email role tokenVersion isBlocked passwordHash loginAttempts lockoutUntil",
   );
 
   // Timing attack mitigation: run bcrypt when user not found so response time is similar
   if (!user) {
     await bcrypt.hash(password, rounds);
-    return res.status(401).json(errorPayload(req, "INVALID_CREDENTIALS", "Invalid email/password"));
+    return res
+      .status(401)
+      .json(errorPayload(req, "INVALID_CREDENTIALS", "Invalid email/password"));
   }
 
   // Account lockout check
   if (user.lockoutUntil && new Date(user.lockoutUntil) > new Date()) {
-    return res.status(423).json(
-      errorPayload(req, "ACCOUNT_LOCKED", "Too many failed attempts. Try again later.")
-    );
+    return res
+      .status(423)
+      .json(
+        errorPayload(
+          req,
+          "ACCOUNT_LOCKED",
+          "Too many failed attempts. Try again later.",
+        ),
+      );
   }
 
   if (user.isBlocked) {
-    return res.status(403).json(errorPayload(req, "USER_BLOCKED", "Your account has been blocked"));
+    return res
+      .status(403)
+      .json(errorPayload(req, "USER_BLOCKED", "Your account has been blocked"));
   }
 
   const ok = await bcrypt.compare(password, user.passwordHash);
 
   if (!ok) {
-    const { incrementLoginAttempts, isLocked } = await recordFailedLogin(user._id);
+    const { incrementLoginAttempts, isLocked } = await recordFailedLogin(
+      user._id,
+    );
     if (isLocked) {
-      return res.status(423).json(
-        errorPayload(req, "ACCOUNT_LOCKED", "Too many failed attempts. Try again later.")
-      );
+      return res
+        .status(423)
+        .json(
+          errorPayload(
+            req,
+            "ACCOUNT_LOCKED",
+            "Too many failed attempts. Try again later.",
+          ),
+        );
     }
-    return res.status(401).json(errorPayload(req, "INVALID_CREDENTIALS", "Invalid email/password"));
+    return res
+      .status(401)
+      .json(errorPayload(req, "INVALID_CREDENTIALS", "Invalid email/password"));
   }
 
   // Successful login: clear lockout and attempts
   await User.updateOne(
     { _id: user._id },
-    { $set: { loginAttempts: 0, lockoutUntil: null } }
+    { $set: { loginAttempts: 0, lockoutUntil: null } },
   ).catch(() => {});
 
   const tokenPayload = {
@@ -241,6 +281,10 @@ router.post("/login", limitLogin, validate(loginSchema), async (req, res) => {
     cartMerged = mergeResult.merged || 0;
   }
 
+  const freshUser = await User.findById(user._id).select(
+    "wholesaleTier b2bApproved",
+  );
+
   return res.json(
     okPayload({
       token,
@@ -250,10 +294,12 @@ router.post("/login", limitLogin, validate(loginSchema), async (req, res) => {
         name: user.name,
         email: user.email,
         role: user.role,
+        wholesaleTier: freshUser?.wholesaleTier || "none",
+        b2bApproved: Boolean(freshUser?.b2bApproved),
       },
       expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || "15m",
       ...(cartMerged > 0 ? { cartMerged } : {}),
-    })
+    }),
   );
 });
 
@@ -272,18 +318,30 @@ router.post(
   async (req, res) => {
     const { currentPassword, newPassword } = req.validated.body;
 
-    const user = await User.findById(req.user._id).select("_id passwordHash tokenVersion isBlocked");
+    const user = await User.findById(req.user._id).select(
+      "_id passwordHash tokenVersion isBlocked",
+    );
     if (!user) {
-      return res.status(401).json(errorPayload(req, "UNAUTHORIZED", "User not found"));
+      return res
+        .status(401)
+        .json(errorPayload(req, "UNAUTHORIZED", "User not found"));
     }
 
     if (user.isBlocked) {
-      return res.status(403).json(errorPayload(req, "USER_BLOCKED", "Your account has been blocked"));
+      return res
+        .status(403)
+        .json(
+          errorPayload(req, "USER_BLOCKED", "Your account has been blocked"),
+        );
     }
 
     const ok = await bcrypt.compare(currentPassword, user.passwordHash);
     if (!ok) {
-      return res.status(401).json(errorPayload(req, "INVALID_CREDENTIALS", "Invalid email/password"));
+      return res
+        .status(401)
+        .json(
+          errorPayload(req, "INVALID_CREDENTIALS", "Invalid email/password"),
+        );
     }
 
     const rounds = Number(process.env.BCRYPT_ROUNDS || 10);
@@ -292,11 +350,11 @@ router.post(
     // Invalidate ALL existing access tokens by bumping tokenVersion
     await User.updateOne(
       { _id: user._id },
-      { $set: { passwordHash }, $inc: { tokenVersion: 1 } }
+      { $set: { passwordHash }, $inc: { tokenVersion: 1 } },
     );
 
     return res.json(okPayload({}));
-  }
+  },
 );
 
 router.post("/logout", limitAuthGeneral, requireAuth(), async (req, res) => {
@@ -316,13 +374,20 @@ router.get("/me", limitAuthGeneral, requireAuth(), async (req, res) => {
   // Return safe user data (no passwordHash, no sensitive fields)
   const user = req.user;
 
+  const fullUser = await User.findById(user._id).select(
+    "name email role wholesaleTier b2bApproved createdAt",
+  );
+
   return res.json(
     okPayload({
       id: user._id,
-      name: user.name || "",
-      email: user.email || "",
-      role: user.role || "user",
-    })
+      name: fullUser?.name || user.name || "",
+      email: fullUser?.email || user.email || "",
+      role: fullUser?.role || user.role || "user",
+      wholesaleTier: fullUser?.wholesaleTier || "none",
+      b2bApproved: Boolean(fullUser?.b2bApproved),
+      createdAt: fullUser?.createdAt || undefined,
+    }),
   );
 });
 
@@ -332,33 +397,58 @@ const forgotPasswordSchema = z.object({
   }),
 });
 
-const PASSWORD_RESET_EXPIRY_MINUTES = Math.max(15, Number(process.env.PASSWORD_RESET_EXPIRY_MINUTES) || 60);
+const PASSWORD_RESET_EXPIRY_MINUTES = Math.max(
+  15,
+  Number(process.env.PASSWORD_RESET_EXPIRY_MINUTES) || 60,
+);
 
 /**
  * POST /auth/forgot-password
  * Always returns success to prevent email enumeration.
  * In production, integrate with your email provider to send the reset link.
  */
-router.post("/forgot-password", limitForgotPassword, validate(forgotPasswordSchema), async (req, res) => {
-  const { email } = req.validated.body;
-  const safeEmail = normalizeEmail(email);
+router.post(
+  "/forgot-password",
+  limitForgotPassword,
+  validate(forgotPasswordSchema),
+  async (req, res) => {
+    const { email } = req.validated.body;
+    const safeEmail = normalizeEmail(email);
 
-  const user = await User.findOne({ email: safeEmail }).select("_id email");
-  if (user) {
-    const token = crypto.randomBytes(32).toString("hex");
-    const expiresAt = new Date(Date.now() + PASSWORD_RESET_EXPIRY_MINUTES * 60 * 1000);
-    await PasswordResetToken.deleteMany({ userId: user._id }).catch(() => {});
-    await PasswordResetToken.create({ userId: user._id, token, expiresAt });
+    const user = await User.findOne({ email: safeEmail }).select("_id email");
+    if (user) {
+      const token = crypto.randomBytes(32).toString("hex");
+      const expiresAt = new Date(
+        Date.now() + PASSWORD_RESET_EXPIRY_MINUTES * 60 * 1000,
+      );
+      await PasswordResetToken.deleteMany({ userId: user._id }).catch(() => {});
+      await PasswordResetToken.create({ userId: user._id, token, expiresAt });
 
-    const resetLink = `${process.env.FRONTEND_URL || process.env.CLIENT_URL || ""}/reset-password?token=${token}`.trim();
-    if (process.env.NODE_ENV !== "production" && resetLink) {
-      req.log?.info?.({ email: safeEmail, resetLink }, "[auth] Password reset link (dev only)");
+      const resetLink =
+        `${process.env.FRONTEND_URL || process.env.CLIENT_URL || ""}/reset-password?token=${token}`.trim();
+      if (process.env.NODE_ENV !== "production" && resetLink) {
+        req.log?.info?.(
+          { email: safeEmail, resetLink },
+          "[auth] Password reset link (dev only)",
+        );
+      }
+      const { sendPasswordResetEmail } =
+        await import("../services/email.service.js");
+      sendPasswordResetEmail(safeEmail, resetLink, req.lang).catch((err) => {
+        console.error(
+          "[auth] Failed to send password reset email:",
+          err.message,
+        );
+      });
     }
-    // TODO: Send email with resetLink (e.g. via nodemailer, SendGrid, etc.)
-  }
 
-  return res.json(okPayload({ message: "If an account exists, you will receive reset instructions." }));
-});
+    return res.json(
+      okPayload({
+        message: "If an account exists, you will receive reset instructions.",
+      }),
+    );
+  },
+);
 
 const resetPasswordSchema = z.object({
   body: z.object({
@@ -371,41 +461,60 @@ const resetPasswordSchema = z.object({
  * POST /auth/reset-password
  * Resets password using token from forgot-password flow.
  */
-router.post("/reset-password", limitAuthGeneral, validate(resetPasswordSchema), async (req, res) => {
-  const { token, newPassword } = req.validated.body;
+router.post(
+  "/reset-password",
+  limitAuthGeneral,
+  validate(resetPasswordSchema),
+  async (req, res) => {
+    const { token, newPassword } = req.validated.body;
 
-  const record = await PasswordResetToken.findOne({
-    token: token.trim(),
-    usedAt: null,
-  }).populate("userId");
+    const record = await PasswordResetToken.findOne({
+      token: token.trim(),
+      usedAt: null,
+    }).populate("userId");
 
-  if (!record || !record.userId) {
-    return res.status(400).json(
-      errorPayload(req, "INVALID_RESET_TOKEN", "Invalid or expired reset token")
+    if (!record || !record.userId) {
+      return res
+        .status(400)
+        .json(
+          errorPayload(
+            req,
+            "INVALID_RESET_TOKEN",
+            "Invalid or expired reset token",
+          ),
+        );
+    }
+
+    if (new Date(record.expiresAt) < new Date()) {
+      await PasswordResetToken.deleteOne({ _id: record._id }).catch(() => {});
+      return res
+        .status(400)
+        .json(
+          errorPayload(
+            req,
+            "INVALID_RESET_TOKEN",
+            "Invalid or expired reset token",
+          ),
+        );
+    }
+
+    const rounds = Number(process.env.BCRYPT_ROUNDS || 10);
+    const passwordHash = await bcrypt.hash(newPassword, rounds);
+
+    await User.updateOne(
+      { _id: record.userId._id },
+      { $set: { passwordHash }, $inc: { tokenVersion: 1 } },
     );
-  }
-
-  if (new Date(record.expiresAt) < new Date()) {
-    await PasswordResetToken.deleteOne({ _id: record._id }).catch(() => {});
-    return res.status(400).json(
-      errorPayload(req, "INVALID_RESET_TOKEN", "Invalid or expired reset token")
+    await PasswordResetToken.updateOne(
+      { _id: record._id },
+      { $set: { usedAt: new Date() } },
     );
-  }
 
-  const rounds = Number(process.env.BCRYPT_ROUNDS || 10);
-  const passwordHash = await bcrypt.hash(newPassword, rounds);
-
-  await User.updateOne(
-    { _id: record.userId._id },
-    { $set: { passwordHash }, $inc: { tokenVersion: 1 } }
-  );
-  await PasswordResetToken.updateOne(
-    { _id: record._id },
-    { $set: { usedAt: new Date() } }
-  );
-
-  return res.json(okPayload({ message: "Password has been reset. You can now sign in." }));
-});
+    return res.json(
+      okPayload({ message: "Password has been reset. You can now sign in." }),
+    );
+  },
+);
 
 const verifyEmailSchema = z.object({
   body: z.object({
@@ -413,69 +522,120 @@ const verifyEmailSchema = z.object({
   }),
 });
 
-const EMAIL_VERIFICATION_EXPIRY_MINUTES = Math.max(60, Number(process.env.EMAIL_VERIFICATION_EXPIRY_MINUTES) || 24 * 60);
+const EMAIL_VERIFICATION_EXPIRY_MINUTES = Math.max(
+  60,
+  Number(process.env.EMAIL_VERIFICATION_EXPIRY_MINUTES) || 24 * 60,
+);
 
 /**
  * POST /auth/verify-email
  * Verifies email using token sent via send-verification-email (or after register if you send it).
  */
-router.post("/verify-email", limitAuthGeneral, validate(verifyEmailSchema), async (req, res) => {
-  const { token } = req.validated.body;
+router.post(
+  "/verify-email",
+  limitAuthGeneral,
+  validate(verifyEmailSchema),
+  async (req, res) => {
+    const { token } = req.validated.body;
 
-  const record = await EmailVerificationToken.findOne({
-    token: token.trim(),
-    usedAt: null,
-  }).populate("userId");
+    const record = await EmailVerificationToken.findOne({
+      token: token.trim(),
+      usedAt: null,
+    }).populate("userId");
 
-  if (!record || !record.userId) {
-    return res.status(400).json(
-      errorPayload(req, "INVALID_VERIFICATION_TOKEN", "Invalid or expired verification token")
+    if (!record || !record.userId) {
+      return res
+        .status(400)
+        .json(
+          errorPayload(
+            req,
+            "INVALID_VERIFICATION_TOKEN",
+            "Invalid or expired verification token",
+          ),
+        );
+    }
+
+    if (new Date(record.expiresAt) < new Date()) {
+      await EmailVerificationToken.deleteOne({ _id: record._id }).catch(
+        () => {},
+      );
+      return res
+        .status(400)
+        .json(
+          errorPayload(
+            req,
+            "INVALID_VERIFICATION_TOKEN",
+            "Invalid or expired verification token",
+          ),
+        );
+    }
+
+    await User.updateOne(
+      { _id: record.userId._id },
+      { $set: { isEmailVerified: true } },
     );
-  }
-
-  if (new Date(record.expiresAt) < new Date()) {
-    await EmailVerificationToken.deleteOne({ _id: record._id }).catch(() => {});
-    return res.status(400).json(
-      errorPayload(req, "INVALID_VERIFICATION_TOKEN", "Invalid or expired verification token")
+    await EmailVerificationToken.updateOne(
+      { _id: record._id },
+      { $set: { usedAt: new Date() } },
     );
-  }
 
-  await User.updateOne({ _id: record.userId._id }, { $set: { isEmailVerified: true } });
-  await EmailVerificationToken.updateOne(
-    { _id: record._id },
-    { $set: { usedAt: new Date() } }
-  );
-
-  return res.json(okPayload({ message: "Email verified successfully." }));
-});
+    return res.json(okPayload({ message: "Email verified successfully." }));
+  },
+);
 
 /**
  * POST /auth/send-verification-email
  * Creates verification token and sends email (or logs link in dev).
  * Requires auth.
  */
-router.post("/send-verification-email", limitAuthGeneral, requireAuth(), async (req, res) => {
-  const user = await User.findById(req.user._id).select("_id email isEmailVerified");
-  if (!user) {
-    return res.status(401).json(errorPayload(req, "UNAUTHORIZED", "User not found"));
-  }
-  if (user.isEmailVerified) {
-    return res.json(okPayload({ message: "Email is already verified." }));
-  }
+router.post(
+  "/send-verification-email",
+  limitAuthGeneral,
+  requireAuth(),
+  async (req, res) => {
+    const user = await User.findById(req.user._id).select(
+      "_id email isEmailVerified",
+    );
+    if (!user) {
+      return res
+        .status(401)
+        .json(errorPayload(req, "UNAUTHORIZED", "User not found"));
+    }
+    if (user.isEmailVerified) {
+      return res.json(okPayload({ message: "Email is already verified." }));
+    }
 
-  const token = crypto.randomBytes(32).toString("hex");
-  const expiresAt = new Date(Date.now() + EMAIL_VERIFICATION_EXPIRY_MINUTES * 60 * 1000);
-  await EmailVerificationToken.deleteMany({ userId: user._id }).catch(() => {});
-  await EmailVerificationToken.create({ userId: user._id, token, expiresAt });
+    const token = crypto.randomBytes(32).toString("hex");
+    const expiresAt = new Date(
+      Date.now() + EMAIL_VERIFICATION_EXPIRY_MINUTES * 60 * 1000,
+    );
+    await EmailVerificationToken.deleteMany({ userId: user._id }).catch(
+      () => {},
+    );
+    await EmailVerificationToken.create({ userId: user._id, token, expiresAt });
 
-  const verifyLink = `${process.env.FRONTEND_URL || process.env.CLIENT_URL || ""}/verify-email?token=${token}`.trim();
-  if (process.env.NODE_ENV !== "production" && verifyLink) {
-    req.log?.info?.({ email: user.email, verifyLink }, "[auth] Email verification link (dev only)");
-  }
-  // TODO: Send email with verifyLink
+    const verifyLink =
+      `${process.env.FRONTEND_URL || process.env.CLIENT_URL || ""}/verify-email?token=${token}`.trim();
+    if (process.env.NODE_ENV !== "production" && verifyLink) {
+      req.log?.info?.(
+        { email: user.email, verifyLink },
+        "[auth] Email verification link (dev only)",
+      );
+    }
+    const { sendEmailVerification } =
+      await import("../services/email.service.js");
+    sendEmailVerification(user.email, verifyLink, req.lang).catch((err) => {
+      console.error("[auth] Failed to send verification email:", err.message);
+    });
 
-  return res.json(okPayload({ message: "If not already verified, you will receive a verification email." }));
-});
+    return res.json(
+      okPayload({
+        message:
+          "If not already verified, you will receive a verification email.",
+      }),
+    );
+  },
+);
 
 const refreshSchema = z.object({
   body: z.object({
@@ -483,78 +643,97 @@ const refreshSchema = z.object({
   }),
 });
 
-router.post("/refresh", limitAuthGeneral, validate(refreshSchema), async (req, res) => {
-  const { refreshToken } = req.validated.body;
+router.post(
+  "/refresh",
+  limitAuthGeneral,
+  validate(refreshSchema),
+  async (req, res) => {
+    const { refreshToken } = req.validated.body;
 
-  try {
-    // Verify refresh token
-    const decoded = verifyToken(refreshToken);
+    try {
+      // Verify refresh token
+      const decoded = verifyToken(refreshToken);
 
-    // Extract user ID from token
-    const userId = decoded.sub || decoded.userId;
-    if (!userId) {
-      return res.status(401).json(
-        errorPayload(req, "INVALID_TOKEN", "Token missing user identifier")
+      // Extract user ID from token
+      const userId = decoded.sub || decoded.userId;
+      if (!userId) {
+        return res
+          .status(401)
+          .json(
+            errorPayload(req, "INVALID_TOKEN", "Token missing user identifier"),
+          );
+      }
+
+      // Check user exists and is not blocked
+      const user = await User.findById(userId).select(
+        "_id name email role tokenVersion isBlocked",
       );
-    }
 
-    // Check user exists and is not blocked
-    const user = await User.findById(userId).select(
-      "_id name email role tokenVersion isBlocked"
-    );
+      if (!user) {
+        return res
+          .status(401)
+          .json(errorPayload(req, "INVALID_TOKEN", "User not found"));
+      }
 
-    if (!user) {
-      return res.status(401).json(
-        errorPayload(req, "INVALID_TOKEN", "User not found")
+      if (user.isBlocked) {
+        return res
+          .status(403)
+          .json(
+            errorPayload(req, "USER_BLOCKED", "Your account has been blocked"),
+          );
+      }
+
+      // Verify tokenVersion matches (revocation check)
+      const tokenVersion = Number(decoded.tokenVersion || 0);
+      if (tokenVersion !== user.tokenVersion) {
+        return res
+          .status(401)
+          .json(errorPayload(req, "TOKEN_REVOKED", "Token has been revoked"));
+      }
+
+      // Generate new tokens
+      const tokenPayload = {
+        sub: user._id.toString(),
+        userId: user._id.toString(),
+        role: user.role,
+        tokenVersion: user.tokenVersion,
+      };
+
+      const accessToken = signToken(tokenPayload);
+      const newRefreshToken = signRefreshToken(tokenPayload);
+
+      return res.json(
+        okPayload({
+          accessToken: accessToken,
+          refreshToken: newRefreshToken,
+          expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || "15m",
+        }),
       );
+    } catch (err) {
+      // Handle JWT verification errors
+      if (
+        err?.code === "TOKEN_INVALID" ||
+        err?.name === "JsonWebTokenError" ||
+        err?.name === "TokenExpiredError"
+      ) {
+        return res
+          .status(401)
+          .json(
+            errorPayload(
+              req,
+              "INVALID_TOKEN",
+              "Invalid or expired refresh token",
+            ),
+          );
+      }
+
+      // Unexpected error
+      console.error("[auth] Refresh token error:", err);
+      return res
+        .status(500)
+        .json(errorPayload(req, "INTERNAL_ERROR", "Failed to refresh token"));
     }
-
-    if (user.isBlocked) {
-      return res.status(403).json(
-        errorPayload(req, "USER_BLOCKED", "Your account has been blocked")
-      );
-    }
-
-    // Verify tokenVersion matches (revocation check)
-    const tokenVersion = Number(decoded.tokenVersion || 0);
-    if (tokenVersion !== user.tokenVersion) {
-      return res.status(401).json(
-        errorPayload(req, "TOKEN_REVOKED", "Token has been revoked")
-      );
-    }
-
-    // Generate new tokens
-    const tokenPayload = {
-      sub: user._id.toString(),
-      userId: user._id.toString(),
-      role: user.role,
-      tokenVersion: user.tokenVersion,
-    };
-
-    const accessToken = signToken(tokenPayload);
-    const newRefreshToken = signRefreshToken(tokenPayload);
-
-    return res.json(
-      okPayload({
-        accessToken: accessToken,
-        refreshToken: newRefreshToken,
-        expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || "15m",
-      })
-    );
-  } catch (err) {
-    // Handle JWT verification errors
-    if (err?.code === "TOKEN_INVALID" || err?.name === "JsonWebTokenError" || err?.name === "TokenExpiredError") {
-      return res.status(401).json(
-        errorPayload(req, "INVALID_TOKEN", "Invalid or expired refresh token")
-      );
-    }
-
-    // Unexpected error
-    console.error("[auth] Refresh token error:", err);
-    return res.status(500).json(
-      errorPayload(req, "INTERNAL_ERROR", "Failed to refresh token")
-    );
-  }
-});
+  },
+);
 
 export default router;

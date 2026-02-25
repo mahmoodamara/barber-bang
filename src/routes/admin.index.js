@@ -18,6 +18,7 @@ import adminCategoriesRoutes from "./admin.categories.routes.js";
 import adminStockReservationsRoutes from "./admin.stock-reservations.routes.js";
 import adminProductsRoutes from "./admin.products.routes.js";
 import adminApprovalsRoutes from "./admin.approvals.routes.js";
+import adminRfqRoutes from "./admin.rfq.routes.js";
 import adminRoutes from "./admin.routes.js";
 
 const router = express.Router();
@@ -37,6 +38,7 @@ router.use("/categories", adminCategoriesRoutes);
 router.use("/stock-reservations", adminStockReservationsRoutes);
 router.use("/products", adminProductsRoutes);
 router.use("/approvals", adminApprovalsRoutes);
+router.use("/rfq", adminRfqRoutes);
 router.use("/", adminRoutes);
 
 export default router;

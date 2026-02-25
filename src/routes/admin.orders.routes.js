@@ -27,6 +27,8 @@ import {
   processRefund,
   issueOrderInvoice,
 } from "../services/admin-orders.service.js";
+import { sendOrderConfirmation } from "../services/email.service.js";
+import { log } from "../utils/logger.js";
 
 const router = express.Router();
 
@@ -38,7 +40,9 @@ const router = express.Router();
  * - Audit all admin actions
  */
 router.use(requireAuth());
-router.use(requireAnyPermission(PERMISSIONS.ORDERS_WRITE, PERMISSIONS.REFUNDS_WRITE));
+router.use(
+  requireAnyPermission(PERMISSIONS.ORDERS_WRITE, PERMISSIONS.REFUNDS_WRITE),
+);
 router.use(auditAdmin());
 
 /* ============================
@@ -63,7 +67,7 @@ function jsonErr(req, res, e) {
       requestId: getRequestId(req),
       path: req.originalUrl || req.url || "",
       // Avoid leaking internal stack by default (keep debug in logs)
-    }
+    },
   );
 }
 
@@ -92,7 +96,11 @@ function escapeRegex(s) {
 }
 
 function makeSearchRegex(input) {
-  const safe = escapeRegex(String(input || "").trim().slice(0, 120));
+  const safe = escapeRegex(
+    String(input || "")
+      .trim()
+      .slice(0, 120),
+  );
   return safe ? new RegExp(safe, "i") : null;
 }
 
@@ -159,12 +167,20 @@ const listQuerySchema = z.object({
       q: z.string().max(120).optional(),
       dateFrom: z.string().datetime().optional(),
       dateTo: z.string().datetime().optional(),
+      isB2B: z.enum(["true", "false"]).optional(),
       page: z.string().regex(/^\d+$/).optional(),
       limit: z.string().regex(/^\d+$/).optional(),
 
       // ✅ Allowlist-only sorting
       sortBy: z
-        .enum(["createdAt", "updatedAt", "status", "paymentMethod", "totalMinor", "orderNumber"])
+        .enum([
+          "createdAt",
+          "updatedAt",
+          "status",
+          "paymentMethod",
+          "totalMinor",
+          "orderNumber",
+        ])
         .optional(),
       sortDir: z.enum(["asc", "desc"]).optional(),
 
@@ -176,7 +192,11 @@ const listQuerySchema = z.object({
       if (val.dateFrom && val.dateTo) {
         const df = new Date(val.dateFrom);
         const dt = new Date(val.dateTo);
-        if (!Number.isNaN(df.getTime()) && !Number.isNaN(dt.getTime()) && df > dt) {
+        if (
+          !Number.isNaN(df.getTime()) &&
+          !Number.isNaN(dt.getTime()) &&
+          df > dt
+        ) {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
             message: "dateFrom must be <= dateTo",
@@ -228,7 +248,14 @@ const refundSchema = z.object({
     .object({
       amount: z.number().min(0).optional(),
       reason: z
-        .enum(["customer_cancel", "return", "out_of_stock", "fraud", "duplicate", "other"])
+        .enum([
+          "customer_cancel",
+          "return",
+          "out_of_stock",
+          "fraud",
+          "duplicate",
+          "other",
+        ])
         .optional(),
       note: z.string().max(400).optional(),
       items: z
@@ -240,7 +267,7 @@ const refundSchema = z.object({
               qty: z.number().int().min(1).max(999),
               amount: z.number().min(0).optional(),
             })
-            .strict()
+            .strict(),
         )
         .max(200)
         .optional(),
@@ -302,8 +329,29 @@ router.get(
         if (dateTo) filter.createdAt.$lte = dateTo;
       }
 
+      // B2B filter: find orders from business accounts
+      if (q.isB2B === "true") {
+        const b2bUserIds = await User.find({ accountType: "business" })
+          .select("_id")
+          .lean();
+        if (b2bUserIds.length) {
+          filter.userId = { $in: b2bUserIds.map((u) => u._id) };
+        } else {
+          filter.userId = null; // no B2B users = no results
+        }
+      } else if (q.isB2B === "false") {
+        const b2bUserIds = await User.find({ accountType: "business" })
+          .select("_id")
+          .lean();
+        if (b2bUserIds.length) {
+          filter.userId = { $nin: b2bUserIds.map((u) => u._id) };
+        }
+      }
+
       // q: orderNumber / phone / (optionally) user email / _id
-      const rawSearch = String(q.q || "").trim().slice(0, 120);
+      const rawSearch = String(q.q || "")
+        .trim()
+        .slice(0, 120);
       const searchRegex = rawSearch ? makeSearchRegex(rawSearch) : null;
 
       if (searchRegex) {
@@ -347,6 +395,15 @@ router.get(
         Order.countDocuments(filter),
       ]);
 
+      // Collect B2B user IDs for badge display
+      const userIds = items.map((o) => o.userId?._id).filter(Boolean);
+      const b2bUsers = userIds.length
+        ? await User.find({ _id: { $in: userIds }, accountType: "business" })
+            .select("_id")
+            .lean()
+        : [];
+      const b2bSet = new Set(b2bUsers.map((u) => String(u._id)));
+
       // Normalize response shape for UI
       const mapped = (items || []).map((o) => ({
         ...mapOrder(o, { lang: req.lang }),
@@ -357,6 +414,7 @@ router.get(
               email: o.userId.email || "",
             }
           : null,
+        isB2B: o.userId ? b2bSet.has(String(o.userId._id)) : false,
       }));
 
       return jsonRes(res, mapped, {
@@ -370,7 +428,7 @@ router.get(
     } catch (e) {
       return jsonErr(req, res, e);
     }
-  }
+  },
 );
 
 /* ============================
@@ -388,7 +446,10 @@ router.get(
         return safeNotFound(req, res, "NOT_FOUND", "Order not found");
       }
 
-      const item = await Order.findById(id).populate("userId", "name email phone");
+      const item = await Order.findById(id).populate(
+        "userId",
+        "name email phone",
+      );
       if (!item) {
         return safeNotFound(req, res, "NOT_FOUND", "Order not found");
       }
@@ -406,7 +467,7 @@ router.get(
     } catch (e) {
       return jsonErr(req, res, e);
     }
-  }
+  },
 );
 
 /* ============================
@@ -419,16 +480,20 @@ router.patch(
   validate(statusUpdateSchema),
   async (req, res) => {
     try {
-      const { order } = await updateOrderStatus(req.params.id, req.validated.body.status, {
-        validateTransition: true,
-        lang: req.lang,
-      });
+      const { order } = await updateOrderStatus(
+        req.params.id,
+        req.validated.body.status,
+        {
+          validateTransition: true,
+          lang: req.lang,
+        },
+      );
 
       return jsonRes(res, mapOrder(order, { lang: req.lang }));
     } catch (e) {
       return jsonErr(req, res, e);
     }
-  }
+  },
 );
 
 /* ============================
@@ -441,12 +506,15 @@ router.patch(
   validate(shippingUpdateSchema),
   async (req, res) => {
     try {
-      const order = await updateOrderShipping(req.params.id, req.validated.body);
+      const order = await updateOrderShipping(
+        req.params.id,
+        req.validated.body,
+      );
       return jsonRes(res, mapOrder(order, { lang: req.lang }));
     } catch (e) {
       return jsonErr(req, res, e);
     }
-  }
+  },
 );
 
 /* ============================
@@ -460,7 +528,10 @@ router.post(
   async (req, res) => {
     try {
       const { reason, restock } = req.validated.body;
-      const { order, restocked } = await cancelOrder(req.params.id, { reason, restock });
+      const { order, restocked } = await cancelOrder(req.params.id, {
+        reason,
+        restock,
+      });
 
       return jsonRes(res, {
         ...mapOrder(order, { lang: req.lang }),
@@ -469,7 +540,7 @@ router.post(
     } catch (e) {
       return jsonErr(req, res, e);
     }
-  }
+  },
 );
 
 /* ============================
@@ -491,7 +562,7 @@ router.post(
           req,
           res,
           "REFUND_REQUIRES_APPROVAL",
-          "Refunds require approval. Create a refund approval request at POST /admin/approvals."
+          "Refunds require approval. Create a refund approval request at POST /admin/approvals.",
         );
       }
 
@@ -530,7 +601,7 @@ router.post(
     } catch (e) {
       return jsonErr(req, res, e);
     }
-  }
+  },
 );
 
 /* ============================
@@ -570,12 +641,11 @@ router.post(
       }
       return jsonErr(req, res, e);
     }
-  }
+  },
 );
 
 /* ============================
    POST /api/admin/orders/:id/resend-email
-   TODO: Implement with actual mailer when available
 ============================ */
 
 router.post(
@@ -589,24 +659,86 @@ router.post(
         return safeNotFound(req, res, "NOT_FOUND", "Order not found");
       }
 
-      const order = await Order.findById(id).select("_id").lean();
+      const order = await Order.findById(id)
+        .populate("userId", "email lang")
+        .lean();
       if (!order) {
         return safeNotFound(req, res, "NOT_FOUND", "Order not found");
       }
 
       const type = req.validated?.body?.type || "confirmation";
 
-      // TODO: implement mailer
-      return jsonRes(res, {
-        orderId: order._id,
-        emailType: type,
-        status: "stub",
-        message: "Email sending not implemented. TODO: integrate with mailer service.",
-      });
+      // Currently only "confirmation" type is supported via our email service.
+      // "shipping" and "invoice" types are stubs for future implementation.
+      if (type !== "confirmation") {
+        return jsonRes(res, {
+          orderId: order._id,
+          emailType: type,
+          status: "not_implemented",
+          message: `Email type "${type}" is not yet implemented.`,
+        });
+      }
+
+      const to = String(order.userId?.email || "")
+        .trim()
+        .toLowerCase();
+      if (!to) {
+        return sendError(
+          res,
+          422,
+          "NO_CUSTOMER_EMAIL",
+          "No customer email address on this order",
+          {
+            requestId: getRequestId(req),
+            path: req.originalUrl || req.url || "",
+          },
+        );
+      }
+
+      const lang = order.userId?.lang || "he";
+
+      try {
+        await sendOrderConfirmation(to, order, lang);
+
+        // Update sent timestamp (admin resend always overwrites)
+        await Order.updateOne(
+          { _id: order._id },
+          { $set: { confirmationEmailSentAt: new Date() } },
+        );
+
+        log.info(
+          { orderId: String(order._id), adminId: String(req.user?._id || "") },
+          "[admin.orders] resend confirmation email: success",
+        );
+
+        return jsonRes(res, {
+          orderId: order._id,
+          emailType: type,
+          status: "sent",
+        });
+      } catch (mailErr) {
+        log.error(
+          {
+            orderId: String(order._id),
+            err: String(mailErr?.message || mailErr),
+          },
+          "[admin.orders] resend confirmation email: failed",
+        );
+        return sendError(
+          res,
+          502,
+          "EMAIL_SEND_FAILED",
+          "Failed to send email",
+          {
+            requestId: getRequestId(req),
+            path: req.originalUrl || req.url || "",
+          },
+        );
+      }
     } catch (e) {
       return jsonErr(req, res, e);
     }
-  }
+  },
 );
 
 export default router;

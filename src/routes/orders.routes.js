@@ -3,7 +3,7 @@ import express from "express";
 import { z } from "zod";
 import mongoose from "mongoose";
 
-import { requireAuth } from "../middleware/auth.js";
+import { requireAuth, optionalAuth } from "../middleware/auth.js";
 import { validate } from "../middleware/validate.js";
 import { Order } from "../models/Order.js";
 
@@ -124,15 +124,23 @@ function pickIdempotencyKey(req) {
 
 async function releaseReservationBestEffort(orderId) {
   await releaseStockReservation({ orderId }).catch((e) => {
-    console.warn("[best-effort] orders release stock reservation failed:", String(e?.message || e));
+    console.warn(
+      "[best-effort] orders release stock reservation failed:",
+      String(e?.message || e),
+    );
   });
 }
 
 async function releaseCouponBestEffort(order) {
-  const code = String(order?.pricing?.discounts?.coupon?.code || order?.pricing?.couponCode || "").trim();
+  const code = String(
+    order?.pricing?.discounts?.coupon?.code || order?.pricing?.couponCode || "",
+  ).trim();
   if (!code) return;
   await releaseCouponReservation({ code, orderId: order._id }).catch((e) => {
-    console.warn("[best-effort] orders release coupon reservation failed:", String(e?.message || e));
+    console.warn(
+      "[best-effort] orders release coupon reservation failed:",
+      String(e?.message || e),
+    );
   });
 }
 
@@ -161,10 +169,16 @@ const trackSchema = z
       phone: z.string().min(7).max(30),
     }),
   })
-  .refine((v) => v.body.orderId || v.body.id || (v.body.orderNumber && v.body.orderNumber.trim()), {
-    message: "orderId, id, or orderNumber is required",
-    path: ["body"],
-  });
+  .refine(
+    (v) =>
+      v.body.orderId ||
+      v.body.id ||
+      (v.body.orderNumber && v.body.orderNumber.trim()),
+    {
+      message: "orderId, id, or orderNumber is required",
+      path: ["body"],
+    },
+  );
 
 const cancelSchema = z.object({
   body: z.object({
@@ -180,7 +194,7 @@ const returnRequestSchema = z.object({
         z.object({
           productId: z.string().min(1),
           qty: z.number().int().min(1).max(999),
-        })
+        }),
       )
       .min(1)
       .max(200)
@@ -196,8 +210,13 @@ const returnRequestSchema = z.object({
  */
 router.get("/me", requireAuth(), async (req, res) => {
   try {
-    const items = await Order.find({ userId: req.user._id }).sort({ createdAt: -1 });
-    return res.json({ ok: true, data: items.map((it) => mapOrder(it, { lang: req.lang })) });
+    const items = await Order.find({ userId: req.user._id }).sort({
+      createdAt: -1,
+    });
+    return res.json({
+      ok: true,
+      data: items.map((it) => mapOrder(it, { lang: req.lang })),
+    });
   } catch (e) {
     return jsonErr(res, e);
   }
@@ -237,7 +256,8 @@ router.post("/track", validate(trackSchema), async (req, res) => {
     if (!order) return safe404(res);
 
     // Prefer shipping.phone (new schema), fallback to address.phone (old)
-    const storedRaw = order?.shipping?.phone || order?.shipping?.address?.phone || "";
+    const storedRaw =
+      order?.shipping?.phone || order?.shipping?.address?.phone || "";
 
     const stored = normalizePhone(storedRaw);
     const provided = normalizePhone(phone);
@@ -330,133 +350,168 @@ router.get("/:id/receipt", requireAuth(), async (req, res) => {
  *
  * Must be BEFORE "/:id"
  */
-router.post("/:id/cancel", requireAuth(), validate(cancelSchema), async (req, res) => {
-  try {
-    const id = String(req.params.id || "");
-    if (!isValidObjectId(id)) return safe404(res);
-
-    const idemKey = pickIdempotencyKey(req);
-    const isAdmin = req.user?.role === "admin";
-
-    // fetch the order (owned by user)
-    const order = await Order.findOne(isAdmin ? { _id: id } : { _id: id, userId: req.user._id });
-    if (!order) return safe404(res);
-
-    if (!canCancelStatus(order.status)) {
-      throw makeErr(400, "CANCEL_NOT_ALLOWED", "Order cannot be cancelled at this stage");
-    }
-
-    // Idempotency: if already cancelled -> return current order
-    if (order.status === "cancelled") {
-      return res.json({ ok: true, data: mapOrder(order, { lang: req.lang }) });
-    }
-
-    const reason = String(req.validated.body?.reason || "");
-    const totalMajor = Number(order?.pricing?.total ?? order?.total ?? 0);
-    const totalMinor = toMinorUnits(totalMajor);
-    const feeMinor = calcCancellationFee(totalMinor);
-    const feeMajor = fromMinorUnits(feeMinor);
-
-    const refundMinor = Math.max(0, totalMinor - feeMinor);
-    const refundMajor = fromMinorUnits(refundMinor);
-
-    const cancelledBy = isAdmin ? "admin" : "user";
-
-    await Order.updateOne(
-      { _id: order._id },
-      {
-        $set: {
-          status: "cancelled",
-          "cancellation.cancelledAt": new Date(),
-          "cancellation.cancelledBy": cancelledBy,
-          "cancellation.reason": reason,
-          "cancellation.feeAmount": feeMajor,
-          ...(idemKey ? { "idempotency.cancelKey": idemKey } : {}),
-        },
-      }
-    );
-    await releaseReservationBestEffort(order._id);
-    if (order?.couponReservation?.status === "reserved") {
-      await releaseCouponBestEffort(order);
-      await Order.updateOne(
-        { _id: order._id },
-        { $set: { "couponReservation.status": "released" } }
-      );
-    }
-
-    const status = String(order.status || "");
-    const stripePaidStatuses = new Set(["paid", "payment_received", "stock_confirmed", "confirmed"]);
-    const shouldRefund = order.paymentMethod === "stripe" && stripePaidStatuses.has(status);
-    const paymentIntentId = String(order?.stripe?.paymentIntentId || "");
-    if (!shouldRefund || order?.refund?.status === "succeeded" || !paymentIntentId || refundMajor <= 0) {
-      const updated = await Order.findById(order._id);
-      return res.json({ ok: true, data: mapOrder(updated, { lang: req.lang }) });
-    }
-
-    // set refund pending
-    await Order.updateOne(
-      { _id: order._id },
-      {
-        $set: {
-          "refund.status": "pending",
-          "refund.reason": "customer_cancel",
-          "refund.requestedAt": new Date(),
-          ...(idemKey ? { "idempotency.refundKey": idemKey } : {}),
-        },
-      }
-    );
-
-    // create refund (total - fee)
+router.post(
+  "/:id/cancel",
+  requireAuth(),
+  validate(cancelSchema),
+  async (req, res) => {
     try {
-      const refund = await createStripeRefund({
-        paymentIntentId,
-        amountMajor: refundMajor,
-        reason: "customer_cancel",
-        idempotencyKey: idemKey || `refund:cancel:${String(order._id)}:${paymentIntentId}`,
-      });
+      const id = String(req.params.id || "");
+      if (!isValidObjectId(id)) return safe404(res);
+
+      const idemKey = pickIdempotencyKey(req);
+      const isAdmin = req.user?.role === "admin";
+
+      // fetch the order (owned by user)
+      const order = await Order.findOne(
+        isAdmin ? { _id: id } : { _id: id, userId: req.user._id },
+      );
+      if (!order) return safe404(res);
+
+      if (!canCancelStatus(order.status)) {
+        throw makeErr(
+          400,
+          "CANCEL_NOT_ALLOWED",
+          "Order cannot be cancelled at this stage",
+        );
+      }
+
+      // Idempotency: if already cancelled -> return current order
+      if (order.status === "cancelled") {
+        return res.json({
+          ok: true,
+          data: mapOrder(order, { lang: req.lang }),
+        });
+      }
+
+      const reason = String(req.validated.body?.reason || "");
+      const totalMajor = Number(order?.pricing?.total ?? order?.total ?? 0);
+      const totalMinor = toMinorUnits(totalMajor);
+      const feeMinor = calcCancellationFee(totalMinor);
+      const feeMajor = fromMinorUnits(feeMinor);
+
+      const refundMinor = Math.max(0, totalMinor - feeMinor);
+      const refundMajor = fromMinorUnits(refundMinor);
+
+      const cancelledBy = isAdmin ? "admin" : "user";
 
       await Order.updateOne(
         { _id: order._id },
         {
           $set: {
-            "refund.status": "succeeded",
-            "refund.amount": refundMajor,
-            "refund.currency": "ils",
-            "refund.stripeRefundId": String(refund?.id || ""),
-            "refund.refundedAt": new Date(),
-            internalNote: "Cancelled and refunded (Stripe)",
+            status: "cancelled",
+            "cancellation.cancelledAt": new Date(),
+            "cancellation.cancelledBy": cancelledBy,
+            "cancellation.reason": reason,
+            "cancellation.feeAmount": feeMajor,
+            ...(idemKey ? { "idempotency.cancelKey": idemKey } : {}),
           },
-        }
-      );
-
-      const updated = await Order.findById(order._id);
-      return res.json({ ok: true, data: mapOrder(updated, { lang: req.lang }) });
-    } catch (rfErr) {
-      await Order.updateOne(
-        { _id: order._id },
-        {
-          $set: {
-            "refund.status": "failed",
-            "refund.reason": "customer_cancel",
-            "refund.failureMessage": String(rfErr?.message || "Refund failed"),
-            internalNote: "Cancel accepted; refund failed - manual refund required",
-          },
-        }
-      );
-
-      const updated = await Order.findById(order._id);
-      return res.status(202).json({
-        ok: true,
-        data: {
-          ...mapOrder(updated, { lang: req.lang }),
-          warning: "CANCEL_ACCEPTED_REFUND_PENDING",
         },
-      });
+      );
+      await releaseReservationBestEffort(order._id);
+      if (order?.couponReservation?.status === "reserved") {
+        await releaseCouponBestEffort(order);
+        await Order.updateOne(
+          { _id: order._id },
+          { $set: { "couponReservation.status": "released" } },
+        );
+      }
+
+      const status = String(order.status || "");
+      const stripePaidStatuses = new Set([
+        "paid",
+        "payment_received",
+        "stock_confirmed",
+        "confirmed",
+      ]);
+      const shouldRefund =
+        order.paymentMethod === "stripe" && stripePaidStatuses.has(status);
+      const paymentIntentId = String(order?.stripe?.paymentIntentId || "");
+      if (
+        !shouldRefund ||
+        order?.refund?.status === "succeeded" ||
+        !paymentIntentId ||
+        refundMajor <= 0
+      ) {
+        const updated = await Order.findById(order._id);
+        return res.json({
+          ok: true,
+          data: mapOrder(updated, { lang: req.lang }),
+        });
+      }
+
+      // set refund pending
+      await Order.updateOne(
+        { _id: order._id },
+        {
+          $set: {
+            "refund.status": "pending",
+            "refund.reason": "customer_cancel",
+            "refund.requestedAt": new Date(),
+            ...(idemKey ? { "idempotency.refundKey": idemKey } : {}),
+          },
+        },
+      );
+
+      // create refund (total - fee)
+      try {
+        const refund = await createStripeRefund({
+          paymentIntentId,
+          amountMajor: refundMajor,
+          reason: "customer_cancel",
+          idempotencyKey:
+            idemKey || `refund:cancel:${String(order._id)}:${paymentIntentId}`,
+        });
+
+        await Order.updateOne(
+          { _id: order._id },
+          {
+            $set: {
+              "refund.status": "succeeded",
+              "refund.amount": refundMajor,
+              "refund.currency": "ils",
+              "refund.stripeRefundId": String(refund?.id || ""),
+              "refund.refundedAt": new Date(),
+              internalNote: "Cancelled and refunded (Stripe)",
+            },
+          },
+        );
+
+        const updated = await Order.findById(order._id);
+        return res.json({
+          ok: true,
+          data: mapOrder(updated, { lang: req.lang }),
+        });
+      } catch (rfErr) {
+        await Order.updateOne(
+          { _id: order._id },
+          {
+            $set: {
+              "refund.status": "failed",
+              "refund.reason": "customer_cancel",
+              "refund.failureMessage": String(
+                rfErr?.message || "Refund failed",
+              ),
+              internalNote:
+                "Cancel accepted; refund failed - manual refund required",
+            },
+          },
+        );
+
+        const updated = await Order.findById(order._id);
+        return res.status(202).json({
+          ok: true,
+          data: {
+            ...mapOrder(updated, { lang: req.lang }),
+            warning: "CANCEL_ACCEPTED_REFUND_PENDING",
+          },
+        });
+      }
+    } catch (e) {
+      return jsonErr(res, e);
     }
-  } catch (e) {
-    return jsonErr(res, e);
-  }
-});
+  },
+);
 
 /**
  * POST /api/v1/orders/:id/return-request
@@ -464,7 +519,88 @@ router.post("/:id/cancel", requireAuth(), validate(cancelSchema), async (req, re
  *
  * Must be BEFORE "/:id"
  */
-router.post("/:id/return-request", requireAuth(), validate(returnRequestSchema), async (req, res) => {
+router.post(
+  "/:id/return-request",
+  requireAuth(),
+  validate(returnRequestSchema),
+  async (req, res) => {
+    try {
+      const id = String(req.params.id || "");
+      if (!isValidObjectId(id)) return safe404(res);
+
+      const order = await Order.findOne({ _id: id, userId: req.user._id });
+      if (!order) return safe404(res);
+
+      // You may choose stricter rules:
+      // - only delivered
+      // - within X days
+      // For MVP Israel readiness: accept request and let admin decide.
+      if (order?.return?.status && order.return.status !== "none") {
+        return res.json({
+          ok: true,
+          data: mapOrder(order, { lang: req.lang }),
+        });
+      }
+
+      const reason = String(req.validated.body?.reason || "").trim();
+      const items = Array.isArray(req.validated.body?.items)
+        ? req.validated.body.items
+        : [];
+
+      // Basic sanity: if items provided, validate they exist in order
+      if (items.length > 0) {
+        const orderProductIds = new Set(
+          (order.items || []).map((it) => String(it.productId)),
+        );
+        for (const x of items) {
+          if (
+            !isValidObjectId(x.productId) ||
+            !orderProductIds.has(String(x.productId))
+          ) {
+            throw makeErr(
+              400,
+              "INVALID_RETURN_ITEM",
+              "Return items must exist in the order",
+            );
+          }
+        }
+      }
+
+      const updated = await Order.findOneAndUpdate(
+        { _id: order._id },
+        {
+          $set: {
+            status:
+              order.status === "delivered" ? "return_requested" : order.status,
+            "return.status": "requested",
+            "return.requestedAt": new Date(),
+            "return.reason": reason,
+            "return.items": items.map((x) => ({
+              productId: new mongoose.Types.ObjectId(String(x.productId)),
+              qty: Number(x.qty),
+            })),
+            internalNote: "Return requested by user",
+          },
+        },
+        { new: true },
+      );
+
+      return res.json({
+        ok: true,
+        data: mapOrder(updated, { lang: req.lang }),
+      });
+    } catch (e) {
+      return jsonErr(res, e);
+    }
+  },
+);
+
+/**
+ * POST /api/v1/orders/:id/reorder
+ * Adds all items from a past order back to the user's cart.
+ * Skips items whose products are no longer active/available.
+ */
+router.post("/:id/reorder", requireAuth(), async (req, res) => {
   try {
     const id = String(req.params.id || "");
     if (!isValidObjectId(id)) return safe404(res);
@@ -472,46 +608,51 @@ router.post("/:id/return-request", requireAuth(), validate(returnRequestSchema),
     const order = await Order.findOne({ _id: id, userId: req.user._id });
     if (!order) return safe404(res);
 
-    // You may choose stricter rules:
-    // - only delivered
-    // - within X days
-    // For MVP Israel readiness: accept request and let admin decide.
-    if (order?.return?.status && order.return.status !== "none") {
-      return res.json({ ok: true, data: mapOrder(order, { lang: req.lang }) });
-    }
+    const { User } = await import("../models/User.js");
+    const { Product } = await import("../models/Product.js");
 
-    const reason = String(req.validated.body?.reason || "").trim();
-    const items = Array.isArray(req.validated.body?.items) ? req.validated.body.items : [];
+    const user = await User.findById(req.user._id);
+    if (!user) return safe404(res);
 
-    // Basic sanity: if items provided, validate they exist in order
-    if (items.length > 0) {
-      const orderProductIds = new Set((order.items || []).map((it) => String(it.productId)));
-      for (const x of items) {
-        if (!isValidObjectId(x.productId) || !orderProductIds.has(String(x.productId))) {
-          throw makeErr(400, "INVALID_RETURN_ITEM", "Return items must exist in the order");
-        }
+    let addedCount = 0;
+    let skippedCount = 0;
+
+    for (const item of order.items || []) {
+      const product = await Product.findOne({
+        _id: item.productId,
+        isActive: true,
+        isDeleted: { $ne: true },
+      });
+
+      if (!product) {
+        skippedCount++;
+        continue;
       }
+
+      const existingIdx = (user.cart || []).findIndex(
+        (c) =>
+          String(c.productId) === String(item.productId) &&
+          (c.variantId || "") === (item.variantId || ""),
+      );
+
+      if (existingIdx >= 0) {
+        user.cart[existingIdx].qty = item.qty || 1;
+      } else {
+        user.cart.push({
+          productId: item.productId,
+          variantId: item.variantId || undefined,
+          qty: item.qty || 1,
+        });
+      }
+      addedCount++;
     }
 
-    const updated = await Order.findOneAndUpdate(
-      { _id: order._id },
-      {
-        $set: {
-          status: order.status === "delivered" ? "return_requested" : order.status,
-          "return.status": "requested",
-          "return.requestedAt": new Date(),
-          "return.reason": reason,
-          "return.items": items.map((x) => ({
-            productId: new mongoose.Types.ObjectId(String(x.productId)),
-            qty: Number(x.qty),
-          })),
-          internalNote: "Return requested by user",
-        },
-      },
-      { new: true }
-    );
+    await user.save();
 
-    return res.json({ ok: true, data: mapOrder(updated, { lang: req.lang }) });
+    return res.json({
+      ok: true,
+      data: { addedCount, skippedCount, cartSize: user.cart.length },
+    });
   } catch (e) {
     return jsonErr(res, e);
   }
@@ -521,13 +662,25 @@ router.post("/:id/return-request", requireAuth(), validate(returnRequestSchema),
  * GET /api/v1/orders/:id
  * Authenticated user order by id
  */
-router.get("/:id", requireAuth(), async (req, res) => {
+router.get("/:id", optionalAuth(), async (req, res) => {
   try {
     const id = String(req.params.id || "");
     if (!isValidObjectId(id)) return safe404(res);
 
-    const item = await Order.findOne({ _id: id, userId: req.user._id });
+    const item = req.user?._id
+      ? await Order.findOne({ _id: id, userId: req.user._id })
+      : await Order.findById(id);
     if (!item) return safe404(res);
+
+    if (!req.user?._id) {
+      const guestPhone = normalizePhone(String(req.query?.phone || ""));
+      const storedRaw =
+        item?.shipping?.phone || item?.shipping?.address?.phone || "";
+      const storedPhone = normalizePhone(storedRaw);
+      if (!guestPhone || !storedPhone || guestPhone !== storedPhone) {
+        return safe404(res);
+      }
+    }
 
     return res.json({ ok: true, data: mapOrder(item, { lang: req.lang }) });
   } catch (e) {

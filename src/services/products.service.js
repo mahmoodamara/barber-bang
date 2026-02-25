@@ -23,7 +23,9 @@ function normalizeItems(items) {
 function toVariantObjectId(id) {
   const v = String(id || "").trim();
   if (!v) return null;
-  return mongoose.Types.ObjectId.isValid(v) ? new mongoose.Types.ObjectId(v) : null;
+  return mongoose.Types.ObjectId.isValid(v)
+    ? new mongoose.Types.ObjectId(v)
+    : null;
 }
 
 /**
@@ -57,7 +59,11 @@ export async function decrementStockAtomicOrThrow(items, session = null) {
 
       const product = flagsByProduct.get(it.productId);
       if (!product) {
-        throw makeErr(400, "OUT_OF_STOCK", "One or more items are out of stock");
+        throw makeErr(
+          400,
+          "OUT_OF_STOCK",
+          "One or more items are out of stock",
+        );
       }
 
       // trackInventory === false: do not decrement stock (product always "in stock")
@@ -86,10 +92,18 @@ export async function decrementStockAtomicOrThrow(items, session = null) {
         ? { $inc: { "variants.$.stock": -qty } }
         : { $inc: { stock: -qty } };
 
-      const res = await Product.updateOne(filter, update, session ? { session } : {});
+      const res = await Product.updateOne(
+        filter,
+        update,
+        session ? { session } : {},
+      );
 
       if (Number(res?.modifiedCount || 0) !== 1) {
-        throw makeErr(400, "OUT_OF_STOCK", "One or more items are out of stock");
+        throw makeErr(
+          400,
+          "OUT_OF_STOCK",
+          "One or more items are out of stock",
+        );
       }
 
       updated.push(it);
@@ -97,7 +111,10 @@ export async function decrementStockAtomicOrThrow(items, session = null) {
   } catch (e) {
     if (updated.length) {
       await restoreStockForItems(updated, session).catch((err) => {
-        console.warn("[best-effort] products restore stock failed:", String(err?.message || err));
+        console.warn(
+          "[best-effort] products restore stock failed:",
+          String(err?.message || err),
+        );
       });
     }
     throw e;
@@ -132,6 +149,29 @@ async function restoreStockForItems(items, session = null) {
   });
 }
 
+/**
+ * Restore stock for returned items.
+ * Each item needs { productId, qty, variantId? }.
+ * Respects trackInventory flag — skips products that don't track inventory.
+ */
+export async function restockReturnedItems(items) {
+  const list = normalizeItems(items);
+  if (!list.length) return { restocked: 0 };
+
+  const productIds = [...new Set(list.map((it) => it.productId))];
+  const flags = await getProductInventoryFlags(productIds);
+
+  const trackable = list.filter((it) => {
+    const f = flags.get(it.productId);
+    return !f || f.trackInventory !== false;
+  });
+
+  if (!trackable.length) return { restocked: 0 };
+
+  await restoreStockForItems(trackable);
+  return { restocked: trackable.length };
+}
+
 export async function reserveStockForOrder({
   orderId,
   userId,
@@ -146,30 +186,42 @@ export async function reserveStockForOrder({
 
   const now = new Date();
   const expiresAt =
-    ttlMinutes && ttlMinutes > 0 ? new Date(Date.now() + ttlMinutes * 60 * 1000) : null;
+    ttlMinutes && ttlMinutes > 0
+      ? new Date(Date.now() + ttlMinutes * 60 * 1000)
+      : null;
 
   const existing = await StockReservation.findOne(
     { orderId },
     null,
-    session ? { session } : {}
+    session ? { session } : {},
   );
 
   if (existing) {
     if (existing.status === "confirmed") return existing;
-    if (existing.status === "reserved" && (!existing.expiresAt || existing.expiresAt > now)) {
+    if (
+      existing.status === "reserved" &&
+      (!existing.expiresAt || existing.expiresAt > now)
+    ) {
       if (expiresAt) {
         await StockReservation.updateOne(
           { _id: existing._id, status: "reserved" },
           { $set: { expiresAt } },
-          session ? { session } : {}
+          session ? { session } : {},
         );
       }
       return existing;
     }
 
-    if (existing.status === "reserved" && existing.expiresAt && existing.expiresAt <= now) {
+    if (
+      existing.status === "reserved" &&
+      existing.expiresAt &&
+      existing.expiresAt <= now
+    ) {
       await releaseStockReservation({ orderId, session }).catch((err) => {
-        console.warn("[best-effort] products release stock reservation failed:", String(err?.message || err));
+        console.warn(
+          "[best-effort] products release stock reservation failed:",
+          String(err?.message || err),
+        );
       });
     }
   }
@@ -194,24 +246,35 @@ export async function reserveStockForOrder({
         upsert: true,
         setDefaultsOnInsert: true,
         ...(session ? { session } : {}),
-      }
+      },
     );
 
     return reservation;
   } catch (e) {
     if (stockReserved) {
       await restoreStockForItems(list, session).catch((err) => {
-        console.warn("[best-effort] products restore stock failed:", String(err?.message || err));
+        console.warn(
+          "[best-effort] products restore stock failed:",
+          String(err?.message || err),
+        );
       });
     }
     throw e;
   }
 }
 
-export async function confirmStockReservation({ orderId, session = null, now = new Date() } = {}) {
+export async function confirmStockReservation({
+  orderId,
+  session = null,
+  now = new Date(),
+} = {}) {
   if (!orderId) return null;
 
-  const existing = await StockReservation.findOne({ orderId }, null, session ? { session } : {});
+  const existing = await StockReservation.findOne(
+    { orderId },
+    null,
+    session ? { session } : {},
+  );
   if (!existing) return null;
   if (existing.status === "confirmed") return existing;
 
@@ -225,12 +288,16 @@ export async function confirmStockReservation({ orderId, session = null, now = n
       $or: [{ expiresAt: null }, { expiresAt: { $gt: now } }],
     },
     { $set: { status: "confirmed", expiresAt: null } },
-    { new: true, ...(session ? { session } : {}) }
+    { new: true, ...(session ? { session } : {}) },
   );
 
   if (updated) return updated;
 
-  const fresh = await StockReservation.findOne({ orderId }, null, session ? { session } : {});
+  const fresh = await StockReservation.findOne(
+    { orderId },
+    null,
+    session ? { session } : {},
+  );
   if (fresh && fresh.status === "confirmed") return fresh;
 
   return null;
@@ -242,7 +309,7 @@ export async function releaseStockReservation({ orderId, session = null }) {
   const reservation = await StockReservation.findOneAndUpdate(
     { orderId, status: "reserved" },
     { $set: { status: "released", expiresAt: new Date() } },
-    { new: true, ...(session ? { session } : {}) }
+    { new: true, ...(session ? { session } : {}) },
   );
 
   if (!reservation) return null;
@@ -263,13 +330,13 @@ export async function releaseStockReservation({ orderId, session = null }) {
         await Product.updateOne(
           { _id: it.productId, "variants._id": variantObjId },
           { $inc: { "variants.$.stock": qty } },
-          session ? { session } : {}
+          session ? { session } : {},
         );
       } else {
         await Product.updateOne(
           { _id: it.productId },
           { $inc: { stock: qty } },
-          session ? { session } : {}
+          session ? { session } : {},
         );
       }
     }
@@ -278,7 +345,10 @@ export async function releaseStockReservation({ orderId, session = null }) {
   return reservation;
 }
 
-export async function releaseExpiredReservations({ now = new Date(), limit = 200 } = {}) {
+export async function releaseExpiredReservations({
+  now = new Date(),
+  limit = 200,
+} = {}) {
   const reservations = await StockReservation.find({
     status: "reserved",
     expiresAt: { $lte: now },
@@ -291,7 +361,7 @@ export async function releaseExpiredReservations({ now = new Date(), limit = 200
   for (const r of reservations) {
     const updated = await StockReservation.findOneAndUpdate(
       { _id: r._id, status: "reserved" },
-      { $set: { status: "expired", expiresAt: now } }
+      { $set: { status: "expired", expiresAt: now } },
     );
 
     if (!updated) continue;
@@ -311,10 +381,13 @@ export async function releaseExpiredReservations({ now = new Date(), limit = 200
         if (isVariant) {
           await Product.updateOne(
             { _id: it.productId, "variants._id": variantObjId },
-            { $inc: { "variants.$.stock": qty } }
+            { $inc: { "variants.$.stock": qty } },
           );
         } else {
-          await Product.updateOne({ _id: it.productId }, { $inc: { stock: qty } });
+          await Product.updateOne(
+            { _id: it.productId },
+            { $inc: { stock: qty } },
+          );
         }
       }
     }
@@ -365,7 +438,9 @@ export async function repairOrphanedReservations({
         // Orphaned reservation - release stock
         const released = await releaseStockReservation({ orderId: r.orderId });
         if (released) {
-          console.info(`[repair] Released orphaned reservation for orderId=${r.orderId}`);
+          console.info(
+            `[repair] Released orphaned reservation for orderId=${r.orderId}`,
+          );
           repaired++;
         }
       }
@@ -393,32 +468,59 @@ export async function verifyOrderStockConsistency(orderId) {
   ]);
 
   if (!reservation && !order) {
-    return { consistent: true, details: "Neither reservation nor order exists" };
+    return {
+      consistent: true,
+      details: "Neither reservation nor order exists",
+    };
   }
 
   if (!reservation && order) {
     // Order exists without reservation - might be legacy or confirmed
     const terminalStatuses = ["delivered", "cancelled", "refunded"];
     if (terminalStatuses.includes(order.status)) {
-      return { consistent: true, details: "Order in terminal state, no reservation needed" };
+      return {
+        consistent: true,
+        details: "Order in terminal state, no reservation needed",
+      };
     }
-    return { consistent: false, details: "Order exists but no reservation found" };
+    return {
+      consistent: false,
+      details: "Order exists but no reservation found",
+    };
   }
 
   if (reservation && !order) {
     if (reservation.status === "reserved") {
-      return { consistent: false, details: "Orphaned reservation - order missing" };
+      return {
+        consistent: false,
+        details: "Orphaned reservation - order missing",
+      };
     }
-    return { consistent: true, details: "Reservation released/expired, order cleaned up" };
+    return {
+      consistent: true,
+      details: "Reservation released/expired, order cleaned up",
+    };
   }
 
   // Both exist - check status alignment
-  if (reservation.status === "confirmed" && order.status !== "pending_payment") {
-    return { consistent: true, details: "Stock confirmed and order progressed" };
+  if (
+    reservation.status === "confirmed" &&
+    order.status !== "pending_payment"
+  ) {
+    return {
+      consistent: true,
+      details: "Stock confirmed and order progressed",
+    };
   }
 
-  if (reservation.status === "reserved" && ["pending_payment", "pending_cod"].includes(order.status)) {
-    return { consistent: true, details: "Pending order with active reservation" };
+  if (
+    reservation.status === "reserved" &&
+    ["pending_payment", "pending_cod"].includes(order.status)
+  ) {
+    return {
+      consistent: true,
+      details: "Pending order with active reservation",
+    };
   }
 
   return { consistent: true, details: "States appear consistent" };
@@ -454,9 +556,11 @@ export async function cleanupStaleConfirmedReservations({ limit = 100 } = {}) {
       if (!order || ["cancelled", "refunded"].includes(order.status)) {
         await StockReservation.updateOne(
           { _id: r._id, status: "confirmed" },
-          { $set: { status: "released" } }
+          { $set: { status: "released" } },
         );
-        console.info(`[cleanup] Marked stale confirmed reservation as released for orderId=${r.orderId}`);
+        console.info(
+          `[cleanup] Marked stale confirmed reservation as released for orderId=${r.orderId}`,
+        );
         cleaned++;
       }
     } catch (err) {

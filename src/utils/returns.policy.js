@@ -32,7 +32,9 @@ function getAllowedStatusesSet() {
 }
 
 function shouldIncludeShippingByDefault() {
-  const v = String(process.env.RETURN_INCLUDE_SHIPPING || "false").toLowerCase();
+  const v = String(
+    process.env.RETURN_INCLUDE_SHIPPING || "false",
+  ).toLowerCase();
   return v === "1" || v === "true" || v === "yes";
 }
 
@@ -131,16 +133,46 @@ export function evaluateReturnEligibility(order) {
 ============================ */
 
 /**
- * Compute refund amount for returned items.
- *
- * If returnItems is null/empty -> full refund of items subtotal (optionally shipping)
- * If returnItems provided -> partial refund based on unitPrice * qty for those items
- *
- * NOTE:
- * - This uses Order.items[].unitPrice (ILS major) from your Order model
- * - Gifts are not refunded (free)
+ * Compute the gross subtotal of all order items (before discounts).
  */
-export function computeReturnRefundAmountMajor({ order, returnItems, includeShipping }) {
+function computeItemsSubtotal(orderItems) {
+  return orderItems.reduce((sum, it) => {
+    const unit = clampMoney(it?.unitPrice ?? 0);
+    const qty = Math.max(1, Math.min(999, Number(it?.qty || 1)));
+    return sum + unit * qty;
+  }, 0);
+}
+
+/**
+ * Compute the proportional discount ratio for the order.
+ * ratio = totalDiscount / itemsSubtotal  (clamped 0..1)
+ */
+function computeDiscountRatio(order, itemsSubtotal) {
+  const discounts = order?.pricing?.discounts ?? {};
+  const discountTotal = clampMoney(
+    Number(order?.pricing?.discountTotal ?? 0) ||
+      Number(discounts?.coupon?.amount ?? 0) +
+        Number(discounts?.campaign?.amount ?? 0) +
+        Number(discounts?.offer?.amount ?? 0),
+  );
+  if (discountTotal <= 0 || itemsSubtotal <= 0) return 0;
+  return Math.min(1, discountTotal / itemsSubtotal);
+}
+
+/**
+ * Compute refund amount for returned items (discount-aware).
+ *
+ * If returnItems is null/empty -> full refund (items subtotal minus proportional discount, optionally shipping)
+ * If returnItems provided -> partial refund with proportional discount allocated per-item
+ *
+ * Discount allocation: each item's effective refund price = unitPrice * (1 - discountRatio)
+ * This prevents over-refunding on discounted orders when only some items are returned.
+ */
+export function computeReturnRefundAmountMajor({
+  order,
+  returnItems,
+  includeShipping,
+}) {
   if (!order) return 0;
 
   const orderItems = Array.isArray(order.items) ? order.items : [];
@@ -148,21 +180,23 @@ export function computeReturnRefundAmountMajor({ order, returnItems, includeShip
   const shippingMajor = clampMoney(order?.pricing?.shippingFee ?? 0);
 
   const includeShip =
-    typeof includeShipping === "boolean" ? includeShipping : shouldIncludeShippingByDefault();
+    typeof includeShipping === "boolean"
+      ? includeShipping
+      : shouldIncludeShippingByDefault();
+
+  const itemsSubtotal = computeItemsSubtotal(orderItems);
+  const discountRatio = computeDiscountRatio(order, itemsSubtotal);
 
   // Full refund if returnItems not specified
   if (!Array.isArray(returnItems) || returnItems.length === 0) {
-    const itemsSubtotal = orderItems.reduce((sum, it) => {
-      const unit = clampMoney(it?.unitPrice ?? 0);
-      const qty = Math.max(1, Math.min(999, Number(it?.qty || 1)));
-      return sum + unit * qty;
-    }, 0);
-
-    const wanted = clampMoney(itemsSubtotal + (includeShip ? shippingMajor : 0));
+    const discountedSubtotal = clampMoney(itemsSubtotal * (1 - discountRatio));
+    const wanted = clampMoney(
+      discountedSubtotal + (includeShip ? shippingMajor : 0),
+    );
     return Math.min(wanted, totalMajor);
   }
 
-  // Partial based on supplied items
+  // Partial based on supplied items, with proportional discount
   const byId = new Map(orderItems.map((it) => [String(it.productId), it]));
 
   let amount = 0;
@@ -177,12 +211,12 @@ export function computeReturnRefundAmountMajor({ order, returnItems, includeShip
     const refundableQty = Math.min(qty, boughtQty);
 
     const unit = clampMoney(it.unitPrice || 0);
-    amount += unit * refundableQty;
+    const effectiveUnit = clampMoney(unit * (1 - discountRatio));
+    amount += effectiveUnit * refundableQty;
   }
 
   amount = clampMoney(amount);
 
-  // Do not exceed order total
   if (includeShip) amount = clampMoney(amount + shippingMajor);
   return Math.min(amount, totalMajor);
 }

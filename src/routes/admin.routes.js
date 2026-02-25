@@ -3,7 +3,11 @@ import express from "express";
 import { z } from "zod";
 import mongoose from "mongoose";
 
-import { requireAuth, requirePermission, PERMISSIONS } from "../middleware/auth.js";
+import {
+  requireAuth,
+  requirePermission,
+  PERMISSIONS,
+} from "../middleware/auth.js";
 import { auditAdmin } from "../middleware/audit.js";
 import { validate } from "../middleware/validate.js";
 import { sendOk, sendCreated, sendError } from "../utils/response.js";
@@ -17,7 +21,10 @@ import { Campaign } from "../models/Campaign.js";
 import { Gift } from "../models/Gift.js";
 import { Offer } from "../models/Offer.js";
 
-import { triggerRepairJob, getRepairJobStatus } from "../jobs/reservationsRepair.job.js";
+import {
+  triggerRepairJob,
+  getRepairJobStatus,
+} from "../jobs/reservationsRepair.job.js";
 
 const router = express.Router();
 
@@ -31,7 +38,8 @@ router.use(auditAdmin());
    Small utilities
 ============================ */
 
-const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(String(id || ""));
+const isValidObjectId = (id) =>
+  mongoose.Types.ObjectId.isValid(String(id || ""));
 
 function makeErr(statusCode, code, message) {
   const err = new Error(message);
@@ -45,7 +53,7 @@ function jsonErr(res, e) {
     res,
     e.statusCode || 500,
     e.code || "INTERNAL_ERROR",
-    e.message || "Unexpected error"
+    e.message || "Unexpected error",
   );
 }
 
@@ -53,17 +61,16 @@ function safeNotFound(res, code = "NOT_FOUND", message = "Not found") {
   return sendError(res, 404, code, message);
 }
 
-const asyncHandler =
-  (fn) =>
-  async (req, res) => {
-    try {
-      await fn(req, res);
-    } catch (e) {
-      return jsonErr(res, e);
-    }
-  };
+const asyncHandler = (fn) => async (req, res) => {
+  try {
+    await fn(req, res);
+  } catch (e) {
+    return jsonErr(res, e);
+  }
+};
 
-const requireObjectIdParam = (paramName, code = "INVALID_ID", message = "Invalid id") =>
+const requireObjectIdParam =
+  (paramName, code = "INVALID_ID", message = "Invalid id") =>
   (req, _res, next) => {
     const id = String(req.params?.[paramName] || "");
     if (!isValidObjectId(id)) return next(makeErr(400, code, message));
@@ -84,7 +91,7 @@ function toDateOrNull(v) {
 
 function mapBilingualPatch(
   b,
-  { nameMax = 160, addressMax = 220, notesMax = 800 } = {}
+  { nameMax = 160, addressMax = 220, notesMax = 800 } = {},
 ) {
   const patch = { ...b };
 
@@ -104,17 +111,26 @@ function mapBilingualPatch(
   }
 
   // Hard caps (defense-in-depth)
-  if (patch.name && patch.name.length > nameMax) patch.name = patch.name.slice(0, nameMax);
-  if (patch.nameHe && patch.nameHe.length > nameMax) patch.nameHe = patch.nameHe.slice(0, nameMax);
-  if (patch.nameAr && patch.nameAr.length > nameMax) patch.nameAr = patch.nameAr.slice(0, nameMax);
+  if (patch.name && patch.name.length > nameMax)
+    patch.name = patch.name.slice(0, nameMax);
+  if (patch.nameHe && patch.nameHe.length > nameMax)
+    patch.nameHe = patch.nameHe.slice(0, nameMax);
+  if (patch.nameAr && patch.nameAr.length > nameMax)
+    patch.nameAr = patch.nameAr.slice(0, nameMax);
 
-  if (patch.address && patch.address.length > addressMax) patch.address = patch.address.slice(0, addressMax);
-  if (patch.addressHe && patch.addressHe.length > addressMax) patch.addressHe = patch.addressHe.slice(0, addressMax);
-  if (patch.addressAr && patch.addressAr.length > addressMax) patch.addressAr = patch.addressAr.slice(0, addressMax);
+  if (patch.address && patch.address.length > addressMax)
+    patch.address = patch.address.slice(0, addressMax);
+  if (patch.addressHe && patch.addressHe.length > addressMax)
+    patch.addressHe = patch.addressHe.slice(0, addressMax);
+  if (patch.addressAr && patch.addressAr.length > addressMax)
+    patch.addressAr = patch.addressAr.slice(0, addressMax);
 
-  if (patch.notes && patch.notes.length > notesMax) patch.notes = patch.notes.slice(0, notesMax);
-  if (patch.notesHe && patch.notesHe.length > notesMax) patch.notesHe = patch.notesHe.slice(0, notesMax);
-  if (patch.notesAr && patch.notesAr.length > notesMax) patch.notesAr = patch.notesAr.slice(0, notesMax);
+  if (patch.notes && patch.notes.length > notesMax)
+    patch.notes = patch.notes.slice(0, notesMax);
+  if (patch.notesHe && patch.notesHe.length > notesMax)
+    patch.notesHe = patch.notesHe.slice(0, notesMax);
+  if (patch.notesAr && patch.notesAr.length > notesMax)
+    patch.notesAr = patch.notesAr.slice(0, notesMax);
 
   return patch;
 }
@@ -133,7 +149,10 @@ function ensureStartBeforeEnd({ startAt, endAt }) {
 const objectIdParamSchema = z.object({ id: z.string().min(1) }).strict();
 
 // Reusable ObjectId string for refs (giftProductId, requiredProductId, etc.)
-const objectIdString = z.string().min(1).refine((v) => isValidObjectId(v), { message: "Invalid ObjectId" });
+const objectIdString = z
+  .string()
+  .min(1)
+  .refine((v) => isValidObjectId(v), { message: "Invalid ObjectId" });
 
 // NOTE: coerce to accept "12" coming from forms safely; still strict allowlisting
 const money = z.coerce.number().min(0);
@@ -195,7 +214,7 @@ router.get(
   asyncHandler(async (_req, res) => {
     const items = await DeliveryArea.find().sort({ createdAt: -1 }).lean();
     return sendOk(res, items);
-  })
+  }),
 );
 
 router.post(
@@ -214,7 +233,7 @@ router.post(
     });
 
     return sendCreated(res, item);
-  })
+  }),
 );
 
 router.put(
@@ -233,7 +252,7 @@ router.put(
 
     if (!item) return safeNotFound(res, "NOT_FOUND", "DeliveryArea not found");
     return sendOk(res, item);
-  })
+  }),
 );
 
 router.delete(
@@ -247,7 +266,7 @@ router.delete(
 
     if (!item) return safeNotFound(res, "NOT_FOUND", "DeliveryArea not found");
     return sendOk(res, { deleted: true });
-  })
+  }),
 );
 
 /* ============================
@@ -301,7 +320,7 @@ router.get(
   asyncHandler(async (_req, res) => {
     const items = await PickupPoint.find().sort({ createdAt: -1 }).lean();
     return sendOk(res, items);
-  })
+  }),
 );
 
 router.post(
@@ -326,7 +345,7 @@ router.post(
     });
 
     return sendCreated(res, item);
-  })
+  }),
 );
 
 router.put(
@@ -336,7 +355,10 @@ router.put(
   requireObjectIdParam("id", "INVALID_ID", "Invalid PickupPoint id"),
   asyncHandler(async (req, res) => {
     const id = String(req.params.id);
-    const patch = mapBilingualPatch(req.validated.body, { nameMax: 160, addressMax: 220 });
+    const patch = mapBilingualPatch(req.validated.body, {
+      nameMax: 160,
+      addressMax: 220,
+    });
 
     const item = await PickupPoint.findByIdAndUpdate(id, patch, {
       new: true,
@@ -345,7 +367,7 @@ router.put(
 
     if (!item) return safeNotFound(res, "NOT_FOUND", "PickupPoint not found");
     return sendOk(res, item);
-  })
+  }),
 );
 
 router.delete(
@@ -359,7 +381,7 @@ router.delete(
 
     if (!item) return safeNotFound(res, "NOT_FOUND", "PickupPoint not found");
     return sendOk(res, { deleted: true });
-  })
+  }),
 );
 
 /* ============================
@@ -387,7 +409,9 @@ router.get(
   "/store-pickup",
   requirePermission(PERMISSIONS.SETTINGS_WRITE),
   asyncHandler(async (_req, res) => {
-    const cfg = await StorePickupConfig.findOne().sort({ createdAt: -1 }).lean();
+    const cfg = await StorePickupConfig.findOne()
+      .sort({ createdAt: -1 })
+      .lean();
     return sendOk(
       res,
       cfg || {
@@ -400,9 +424,9 @@ router.get(
         // legacy
         address: "",
         notes: "",
-      }
+      },
     );
-  })
+  }),
 );
 
 router.put(
@@ -410,7 +434,10 @@ router.put(
   requirePermission(PERMISSIONS.SETTINGS_WRITE),
   validate(storePickupUpdateSchema),
   asyncHandler(async (req, res) => {
-    const patch = mapBilingualPatch(req.validated.body, { addressMax: 220, notesMax: 800 });
+    const patch = mapBilingualPatch(req.validated.body, {
+      addressMax: 220,
+      notesMax: 800,
+    });
 
     const cfg = await StorePickupConfig.findOne().sort({ createdAt: -1 });
     if (!cfg) {
@@ -422,7 +449,7 @@ router.put(
     await cfg.save();
 
     return sendOk(res, cfg);
-  })
+  }),
 );
 
 /* ============================
@@ -438,6 +465,7 @@ const couponCreateSchema = z.object({
       minOrderTotal: money.optional(),
       maxDiscount: money.nullable().optional(),
       usageLimit: intMin1.nullable().optional(),
+      usagePerUser: intMin1.nullable().optional(),
       startAt: z.string().datetime().nullable().optional(),
       endAt: z.string().datetime().nullable().optional(),
       isActive: z.boolean().optional(),
@@ -455,6 +483,7 @@ const couponUpdateSchema = z.object({
       minOrderTotal: money.optional(),
       maxDiscount: money.nullable().optional(),
       usageLimit: intMin1.nullable().optional(),
+      usagePerUser: intMin1.nullable().optional(),
       startAt: z.string().datetime().nullable().optional(),
       endAt: z.string().datetime().nullable().optional(),
       isActive: z.boolean().optional(),
@@ -472,7 +501,7 @@ router.get(
   asyncHandler(async (_req, res) => {
     const items = await Coupon.find().sort({ createdAt: -1 }).lean();
     return sendOk(res, items);
-  })
+  }),
 );
 
 router.post(
@@ -493,13 +522,14 @@ router.post(
       minOrderTotal: b.minOrderTotal ?? 0,
       maxDiscount: b.maxDiscount ?? null,
       usageLimit: b.usageLimit ?? null,
+      usagePerUser: b.usagePerUser ?? null,
       startAt,
       endAt,
       isActive: b.isActive ?? true,
     });
 
     return sendCreated(res, item);
-  })
+  }),
 );
 
 const updateCouponHandler = asyncHandler(async (req, res) => {
@@ -508,12 +538,20 @@ const updateCouponHandler = asyncHandler(async (req, res) => {
 
   if (patch.code) patch.code = normalizeCouponCode(patch.code);
 
-  if ("startAt" in patch) patch.startAt = patch.startAt ? toDateOrNull(patch.startAt) : null;
-  if ("endAt" in patch) patch.endAt = patch.endAt ? toDateOrNull(patch.endAt) : null;
+  if ("startAt" in patch)
+    patch.startAt = patch.startAt ? toDateOrNull(patch.startAt) : null;
+  if ("endAt" in patch)
+    patch.endAt = patch.endAt ? toDateOrNull(patch.endAt) : null;
 
-  ensureStartBeforeEnd({ startAt: patch.startAt ?? null, endAt: patch.endAt ?? null });
+  ensureStartBeforeEnd({
+    startAt: patch.startAt ?? null,
+    endAt: patch.endAt ?? null,
+  });
 
-  const item = await Coupon.findByIdAndUpdate(id, patch, { new: true, runValidators: true });
+  const item = await Coupon.findByIdAndUpdate(id, patch, {
+    new: true,
+    runValidators: true,
+  });
   if (!item) return safeNotFound(res, "NOT_FOUND", "Coupon not found");
 
   return sendOk(res, item);
@@ -524,7 +562,7 @@ router.put(
   requirePermission(PERMISSIONS.PROMOS_WRITE),
   validate(couponUpdateSchema),
   requireObjectIdParam("id", "INVALID_ID", "Invalid Coupon id"),
-  updateCouponHandler
+  updateCouponHandler,
 );
 
 router.patch(
@@ -532,7 +570,7 @@ router.patch(
   requirePermission(PERMISSIONS.PROMOS_WRITE),
   validate(couponUpdateSchema),
   requireObjectIdParam("id", "INVALID_ID", "Invalid Coupon id"),
-  updateCouponHandler
+  updateCouponHandler,
 );
 
 router.delete(
@@ -545,7 +583,7 @@ router.delete(
     const item = await Coupon.findByIdAndDelete(id);
     if (!item) return safeNotFound(res, "NOT_FOUND", "Coupon not found");
     return sendOk(res, { deleted: true });
-  })
+  }),
 );
 
 /* ============================
@@ -599,7 +637,7 @@ router.get(
   asyncHandler(async (_req, res) => {
     const items = await Campaign.find().sort({ createdAt: -1 }).lean();
     return sendOk(res, items);
-  })
+  }),
 );
 
 router.post(
@@ -628,19 +666,27 @@ router.post(
     });
 
     return sendCreated(res, item);
-  })
+  }),
 );
 
 const updateCampaignHandler = asyncHandler(async (req, res) => {
   const id = String(req.params.id);
   const patch = mapBilingualPatch(req.validated.body, { nameMax: 160 });
 
-  if ("startAt" in patch) patch.startAt = patch.startAt ? toDateOrNull(patch.startAt) : null;
-  if ("endAt" in patch) patch.endAt = patch.endAt ? toDateOrNull(patch.endAt) : null;
+  if ("startAt" in patch)
+    patch.startAt = patch.startAt ? toDateOrNull(patch.startAt) : null;
+  if ("endAt" in patch)
+    patch.endAt = patch.endAt ? toDateOrNull(patch.endAt) : null;
 
-  ensureStartBeforeEnd({ startAt: patch.startAt ?? null, endAt: patch.endAt ?? null });
+  ensureStartBeforeEnd({
+    startAt: patch.startAt ?? null,
+    endAt: patch.endAt ?? null,
+  });
 
-  const item = await Campaign.findByIdAndUpdate(id, patch, { new: true, runValidators: true });
+  const item = await Campaign.findByIdAndUpdate(id, patch, {
+    new: true,
+    runValidators: true,
+  });
   if (!item) return safeNotFound(res, "NOT_FOUND", "Campaign not found");
 
   return sendOk(res, item);
@@ -651,7 +697,7 @@ router.put(
   requirePermission(PERMISSIONS.PROMOS_WRITE),
   validate(campaignUpdateSchema),
   requireObjectIdParam("id", "INVALID_ID", "Invalid Campaign id"),
-  updateCampaignHandler
+  updateCampaignHandler,
 );
 
 router.patch(
@@ -659,7 +705,7 @@ router.patch(
   requirePermission(PERMISSIONS.PROMOS_WRITE),
   validate(campaignUpdateSchema),
   requireObjectIdParam("id", "INVALID_ID", "Invalid Campaign id"),
-  updateCampaignHandler
+  updateCampaignHandler,
 );
 
 router.delete(
@@ -672,7 +718,7 @@ router.delete(
     const item = await Campaign.findByIdAndDelete(id);
     if (!item) return safeNotFound(res, "NOT_FOUND", "Campaign not found");
     return sendOk(res, { deleted: true });
-  })
+  }),
 );
 
 /* ============================
@@ -728,7 +774,7 @@ router.get(
   asyncHandler(async (_req, res) => {
     const items = await Gift.find().sort({ createdAt: -1 }).lean();
     return sendOk(res, items);
-  })
+  }),
 );
 
 router.get(
@@ -740,7 +786,7 @@ router.get(
     const item = await Gift.findById(id).lean();
     if (!item) return safeNotFound(res, "NOT_FOUND", "Gift not found");
     return sendOk(res, item);
-  })
+  }),
 );
 
 router.post(
@@ -770,19 +816,27 @@ router.post(
     });
 
     return sendCreated(res, item);
-  })
+  }),
 );
 
 const updateGiftHandler = asyncHandler(async (req, res) => {
   const id = String(req.params.id);
   const patch = mapBilingualPatch(req.validated.body, { nameMax: 160 });
 
-  if ("startAt" in patch) patch.startAt = patch.startAt ? toDateOrNull(patch.startAt) : null;
-  if ("endAt" in patch) patch.endAt = patch.endAt ? toDateOrNull(patch.endAt) : null;
+  if ("startAt" in patch)
+    patch.startAt = patch.startAt ? toDateOrNull(patch.startAt) : null;
+  if ("endAt" in patch)
+    patch.endAt = patch.endAt ? toDateOrNull(patch.endAt) : null;
 
-  ensureStartBeforeEnd({ startAt: patch.startAt ?? null, endAt: patch.endAt ?? null });
+  ensureStartBeforeEnd({
+    startAt: patch.startAt ?? null,
+    endAt: patch.endAt ?? null,
+  });
 
-  const item = await Gift.findByIdAndUpdate(id, patch, { new: true, runValidators: true });
+  const item = await Gift.findByIdAndUpdate(id, patch, {
+    new: true,
+    runValidators: true,
+  });
   if (!item) return safeNotFound(res, "NOT_FOUND", "Gift not found");
 
   return sendOk(res, item);
@@ -793,7 +847,7 @@ router.put(
   requirePermission(PERMISSIONS.PROMOS_WRITE),
   validate(giftUpdateSchema),
   requireObjectIdParam("id", "INVALID_ID", "Invalid Gift id"),
-  updateGiftHandler
+  updateGiftHandler,
 );
 
 router.patch(
@@ -801,7 +855,7 @@ router.patch(
   requirePermission(PERMISSIONS.PROMOS_WRITE),
   validate(giftUpdateSchema),
   requireObjectIdParam("id", "INVALID_ID", "Invalid Gift id"),
-  updateGiftHandler
+  updateGiftHandler,
 );
 
 router.delete(
@@ -814,7 +868,7 @@ router.delete(
     const item = await Gift.findByIdAndDelete(id);
     if (!item) return safeNotFound(res, "NOT_FOUND", "Gift not found");
     return sendOk(res, { deleted: true });
-  })
+  }),
 );
 
 /* ============================
@@ -827,14 +881,21 @@ const offerCreateSchema = z.object({
       nameHe: z.string().min(2).max(160).optional(),
       nameAr: z.string().max(160).optional(),
       name: z.string().min(2).max(160).optional(),
-      type: z.enum(["PERCENT_OFF", "FIXED_OFF", "BUY_X_GET_Y", "FREE_SHIPPING"]),
+      type: z.enum([
+        "PERCENT_OFF",
+        "FIXED_OFF",
+        "BUY_X_GET_Y",
+        "FREE_SHIPPING",
+      ]),
       value: money.optional(),
       minTotal: money.optional(),
       productIds: z.array(z.string().min(1)).optional(),
       categoryIds: z.array(z.string().min(1)).optional(),
       buyProductId: z.string().min(1).nullable().optional(),
+      buyVariantId: z.string().min(1).nullable().optional(),
       buyQty: intMin1.optional(),
       getProductId: z.string().min(1).nullable().optional(),
+      getVariantId: z.string().min(1).nullable().optional(),
       getQty: intMin1.optional(),
       maxDiscount: money.optional(),
       stackable: z.boolean().optional(),
@@ -853,14 +914,18 @@ const offerUpdateSchema = z.object({
       nameHe: z.string().min(2).max(160).optional(),
       nameAr: z.string().max(160).optional(),
       name: z.string().min(2).max(160).optional(),
-      type: z.enum(["PERCENT_OFF", "FIXED_OFF", "BUY_X_GET_Y", "FREE_SHIPPING"]).optional(),
+      type: z
+        .enum(["PERCENT_OFF", "FIXED_OFF", "BUY_X_GET_Y", "FREE_SHIPPING"])
+        .optional(),
       value: money.optional(),
       minTotal: money.optional(),
       productIds: z.array(z.string().min(1)).optional(),
       categoryIds: z.array(z.string().min(1)).optional(),
       buyProductId: z.string().min(1).nullable().optional(),
+      buyVariantId: z.string().min(1).nullable().optional(),
       buyQty: intMin1.optional(),
       getProductId: z.string().min(1).nullable().optional(),
+      getVariantId: z.string().min(1).nullable().optional(),
       getQty: intMin1.optional(),
       maxDiscount: money.optional(),
       stackable: z.boolean().optional(),
@@ -880,9 +945,11 @@ router.get(
   "/offers",
   requirePermission(PERMISSIONS.PROMOS_WRITE),
   asyncHandler(async (_req, res) => {
-    const items = await Offer.find().sort({ priority: 1, createdAt: -1 }).lean();
+    const items = await Offer.find()
+      .sort({ priority: 1, createdAt: -1 })
+      .lean();
     return sendOk(res, items);
-  })
+  }),
 );
 
 router.post(
@@ -906,8 +973,10 @@ router.post(
       productIds: b.productIds || [],
       categoryIds: b.categoryIds || [],
       buyProductId: b.buyProductId ?? null,
+      buyVariantId: b.buyVariantId ?? null,
       buyQty: b.buyQty ?? 1,
       getProductId: b.getProductId ?? null,
+      getVariantId: b.getVariantId ?? null,
       getQty: b.getQty ?? 1,
       maxDiscount: b.maxDiscount ?? 0,
       stackable: b.stackable ?? true,
@@ -919,19 +988,27 @@ router.post(
 
     invalidateHomeCache().catch(() => {});
     return sendCreated(res, item);
-  })
+  }),
 );
 
 const updateOfferHandler = asyncHandler(async (req, res) => {
   const id = String(req.params.id);
   const patch = mapBilingualPatch(req.validated.body, { nameMax: 160 });
 
-  if ("startAt" in patch) patch.startAt = patch.startAt ? toDateOrNull(patch.startAt) : null;
-  if ("endAt" in patch) patch.endAt = patch.endAt ? toDateOrNull(patch.endAt) : null;
+  if ("startAt" in patch)
+    patch.startAt = patch.startAt ? toDateOrNull(patch.startAt) : null;
+  if ("endAt" in patch)
+    patch.endAt = patch.endAt ? toDateOrNull(patch.endAt) : null;
 
-  ensureStartBeforeEnd({ startAt: patch.startAt ?? null, endAt: patch.endAt ?? null });
+  ensureStartBeforeEnd({
+    startAt: patch.startAt ?? null,
+    endAt: patch.endAt ?? null,
+  });
 
-  const item = await Offer.findByIdAndUpdate(id, patch, { new: true, runValidators: true });
+  const item = await Offer.findByIdAndUpdate(id, patch, {
+    new: true,
+    runValidators: true,
+  });
   if (!item) return safeNotFound(res, "NOT_FOUND", "Offer not found");
 
   invalidateHomeCache().catch(() => {});
@@ -943,7 +1020,7 @@ router.put(
   requirePermission(PERMISSIONS.PROMOS_WRITE),
   validate(offerUpdateSchema),
   requireObjectIdParam("id", "INVALID_ID", "Invalid Offer id"),
-  updateOfferHandler
+  updateOfferHandler,
 );
 
 router.patch(
@@ -951,7 +1028,7 @@ router.patch(
   requirePermission(PERMISSIONS.PROMOS_WRITE),
   validate(offerUpdateSchema),
   requireObjectIdParam("id", "INVALID_ID", "Invalid Offer id"),
-  updateOfferHandler
+  updateOfferHandler,
 );
 
 router.delete(
@@ -965,7 +1042,7 @@ router.delete(
     if (!item) return safeNotFound(res, "NOT_FOUND", "Offer not found");
     invalidateHomeCache().catch(() => {});
     return sendOk(res, { deleted: true });
-  })
+  }),
 );
 
 /* ============================
@@ -978,7 +1055,7 @@ router.get(
   asyncHandler(async (_req, res) => {
     const status = getRepairJobStatus();
     return sendOk(res, status);
-  })
+  }),
 );
 
 router.post(
@@ -987,7 +1064,7 @@ router.post(
   asyncHandler(async (_req, res) => {
     const result = await triggerRepairJob();
     return sendOk(res, result);
-  })
+  }),
 );
 
 export default router;

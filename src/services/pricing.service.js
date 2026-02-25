@@ -2,6 +2,7 @@
 
 import mongoose from "mongoose";
 import { Product } from "../models/Product.js";
+import { User } from "../models/User.js";
 import { Coupon } from "../models/Coupon.js";
 import { CouponReservation } from "../models/CouponReservation.js";
 import { CouponRedemption } from "../models/CouponRedemption.js";
@@ -75,7 +76,7 @@ async function incrementUserUsage({ couponId, userId, limit, session }) {
     const usage = await CouponUserUsage.findOneAndUpdate(
       filter,
       { $inc: { usedCount: 1 } },
-      { new: true, upsert: true, setDefaultsOnInsert: true, ...opts }
+      { new: true, upsert: true, setDefaultsOnInsert: true, ...opts },
     );
     if (!usage) return { ok: false, error: "COUPON_USER_LIMIT_REACHED" };
     return { ok: true, usage };
@@ -84,7 +85,7 @@ async function incrementUserUsage({ couponId, userId, limit, session }) {
       const usage = await CouponUserUsage.findOneAndUpdate(
         filter,
         { $inc: { usedCount: 1 } },
-        { new: true, ...opts }
+        { new: true, ...opts },
       );
       if (!usage) return { ok: false, error: "COUPON_USER_LIMIT_REACHED" };
       return { ok: true, usage };
@@ -99,11 +100,17 @@ async function decrementUserUsage({ couponId, userId, session }) {
   await CouponUserUsage.updateOne(
     { couponId, userId, usedCount: { $gt: 0 } },
     { $inc: { usedCount: -1 } },
-    opts
+    opts,
   ).catch(() => {});
 }
 
-export async function consumeCouponAtomic({ code, orderId, userId = null, discountAmount = 0, session = null }) {
+export async function consumeCouponAtomic({
+  code,
+  orderId,
+  userId = null,
+  discountAmount = 0,
+  session = null,
+}) {
   if (!code || !orderId) {
     return { success: false, error: "Missing code or orderId" };
   }
@@ -133,7 +140,7 @@ export async function consumeCouponAtomic({ code, orderId, userId = null, discou
     const existingRedemption = await CouponRedemption.findOne(
       { couponId: coupon._id, orderId: orderObjId },
       null,
-      opts
+      opts,
     );
     if (existingRedemption) {
       return { success: true, alreadyUsed: true };
@@ -153,7 +160,11 @@ export async function consumeCouponAtomic({ code, orderId, userId = null, discou
         limit: coupon.usagePerUser,
         session: tx,
       });
-      if (!usageRes.ok) return { success: false, error: usageRes.error || "COUPON_USER_LIMIT_REACHED" };
+      if (!usageRes.ok)
+        return {
+          success: false,
+          error: usageRes.error || "COUPON_USER_LIMIT_REACHED",
+        };
       usageUpdated = true;
     }
 
@@ -170,13 +181,17 @@ export async function consumeCouponAtomic({ code, orderId, userId = null, discou
             redeemedAt: new Date(),
           },
         ],
-        opts
+        opts,
       );
     } catch (e) {
       // Duplicate key error = already redeemed (concurrent request)
       if (e.code === 11000) {
         if (usageUpdated) {
-          await decrementUserUsage({ couponId: coupon._id, userId: userObjId, session: tx });
+          await decrementUserUsage({
+            couponId: coupon._id,
+            userId: userObjId,
+            session: tx,
+          });
         }
         return { success: true, alreadyUsed: true };
       }
@@ -187,9 +202,12 @@ export async function consumeCouponAtomic({ code, orderId, userId = null, discou
     await Coupon.updateOne(
       { _id: coupon._id },
       { $inc: { usedCount: 1 } },
-      opts
+      opts,
     ).catch((e) => {
-      console.warn("[coupon] usedCount increment failed:", String(e?.message || e));
+      console.warn(
+        "[coupon] usedCount increment failed:",
+        String(e?.message || e),
+      );
     });
 
     return { success: true, alreadyUsed: false };
@@ -222,9 +240,10 @@ export async function reserveCouponAtomic({
     return { success: false, error: "Invalid orderId" };
   }
 
-  const userObjId = userId && mongoose.Types.ObjectId.isValid(userId)
-    ? new mongoose.Types.ObjectId(userId)
-    : null;
+  const userObjId =
+    userId && mongoose.Types.ObjectId.isValid(userId)
+      ? new mongoose.Types.ObjectId(userId)
+      : null;
 
   const now = new Date();
   const expiresAt = new Date(Date.now() + Math.max(1, ttlMinutes) * 60 * 1000);
@@ -234,26 +253,36 @@ export async function reserveCouponAtomic({
   const coupon = await Coupon.findOne({ code: normalized }, null, opts);
   if (!coupon) return { success: false, error: "COUPON_NOT_FOUND" };
   if (!coupon.isActive) return { success: false, error: "COUPON_INACTIVE" };
-  if (!isActiveByDates(coupon, now)) return { success: false, error: "COUPON_EXPIRED" };
+  if (!isActiveByDates(coupon, now))
+    return { success: false, error: "COUPON_EXPIRED" };
 
   // Check if already reserved by this order
   const existingReservation = await CouponReservation.findOne(
     { couponId: coupon._id, orderId: orderObjId, status: "active" },
     null,
-    opts
+    opts,
   );
   if (existingReservation) {
-    return { success: true, alreadyReserved: true, expiresAt: existingReservation.expiresAt };
+    return {
+      success: true,
+      alreadyReserved: true,
+      expiresAt: existingReservation.expiresAt,
+    };
   }
 
   // Check if already redeemed by this order
   const existingRedemption = await CouponRedemption.findOne(
     { couponId: coupon._id, orderId: orderObjId },
     null,
-    opts
+    opts,
   );
   if (existingRedemption) {
-    return { success: true, alreadyReserved: true, alreadyUsed: true, expiresAt };
+    return {
+      success: true,
+      alreadyReserved: true,
+      alreadyUsed: true,
+      expiresAt,
+    };
   }
 
   // Check per-user limit using usage counter (avoid countDocuments)
@@ -261,7 +290,7 @@ export async function reserveCouponAtomic({
     const usage = await CouponUserUsage.findOne(
       { couponId: coupon._id, userId: userObjId },
       null,
-      opts
+      opts,
     );
     if (usage && Number(usage.usedCount || 0) >= coupon.usagePerUser) {
       return { success: false, error: "COUPON_USER_LIMIT_REACHED" };
@@ -277,7 +306,12 @@ export async function reserveCouponAtomic({
   if (coupon.usageLimit) {
     updateFilter.$expr = {
       $lt: [
-        { $add: [{ $ifNull: ["$usedCount", 0] }, { $ifNull: ["$reservedCount", 0] }] },
+        {
+          $add: [
+            { $ifNull: ["$usedCount", 0] },
+            { $ifNull: ["$reservedCount", 0] },
+          ],
+        },
         coupon.usageLimit,
       ],
     };
@@ -286,7 +320,7 @@ export async function reserveCouponAtomic({
   const updatedCoupon = await Coupon.findOneAndUpdate(
     updateFilter,
     { $inc: { reservedCount: 1 } },
-    { new: true, ...opts }
+    { new: true, ...opts },
   );
 
   if (!updatedCoupon) {
@@ -307,7 +341,7 @@ export async function reserveCouponAtomic({
           status: "active",
         },
       ],
-      opts
+      opts,
     );
   } catch (e) {
     if (e.code === 11000) {
@@ -315,17 +349,21 @@ export async function reserveCouponAtomic({
       await Coupon.updateOne(
         { _id: coupon._id, reservedCount: { $gt: 0 } },
         { $inc: { reservedCount: -1 } },
-        opts
+        opts,
       ).catch(() => {});
 
       // Check if this order already has a reservation (idempotent case)
       const existingByOrder = await CouponReservation.findOne(
         { couponId: coupon._id, orderId: orderObjId },
         null,
-        opts
+        opts,
       );
       if (existingByOrder) {
-        return { success: true, alreadyReserved: true, expiresAt: existingByOrder.expiresAt || expiresAt };
+        return {
+          success: true,
+          alreadyReserved: true,
+          expiresAt: existingByOrder.expiresAt || expiresAt,
+        };
       }
 
       // If no reservation for this order, duplicate was from userId index
@@ -339,7 +377,7 @@ export async function reserveCouponAtomic({
     await Coupon.updateOne(
       { _id: coupon._id, reservedCount: { $gt: 0 } },
       { $inc: { reservedCount: -1 } },
-      opts
+      opts,
     ).catch(() => {});
     throw e;
   }
@@ -351,8 +389,13 @@ export async function reserveCouponAtomic({
  * ✅ Release a coupon reservation
  * Marks CouponReservation as released and decrements reservedCount
  */
-export async function releaseCouponReservation({ code, orderId, session = null } = {}) {
-  if (!code || !orderId) return { success: false, error: "Missing code or orderId" };
+export async function releaseCouponReservation({
+  code,
+  orderId,
+  session = null,
+} = {}) {
+  if (!code || !orderId)
+    return { success: false, error: "Missing code or orderId" };
 
   const normalized = String(code).trim().toUpperCase();
   const orderObjId = mongoose.Types.ObjectId.isValid(orderId)
@@ -368,7 +411,7 @@ export async function releaseCouponReservation({ code, orderId, session = null }
   const reservation = await CouponReservation.findOneAndUpdate(
     { couponCode: normalized, orderId: orderObjId, status: "active" },
     { $set: { status: "released" } },
-    { new: true, ...opts }
+    { new: true, ...opts },
   );
 
   if (!reservation) {
@@ -379,9 +422,12 @@ export async function releaseCouponReservation({ code, orderId, session = null }
   await Coupon.updateOne(
     { _id: reservation.couponId, reservedCount: { $gt: 0 } },
     { $inc: { reservedCount: -1 } },
-    opts
+    opts,
   ).catch((e) => {
-    console.warn("[coupon] reservedCount decrement failed:", String(e?.message || e));
+    console.warn(
+      "[coupon] reservedCount decrement failed:",
+      String(e?.message || e),
+    );
   });
 
   return { success: true };
@@ -392,7 +438,13 @@ export async function releaseCouponReservation({ code, orderId, session = null }
  * Converts CouponReservation to CouponRedemption atomically.
  * Requires an active reservation; does not create a redemption or change counters if none exists.
  */
-export async function consumeReservedCoupon({ code, orderId, userId = null, discountAmount = 0, session = null } = {}) {
+export async function consumeReservedCoupon({
+  code,
+  orderId,
+  userId = null,
+  discountAmount = 0,
+  session = null,
+} = {}) {
   if (!code || !orderId) {
     return { success: false, error: "Missing code or orderId" };
   }
@@ -416,7 +468,7 @@ export async function consumeReservedCoupon({ code, orderId, userId = null, disc
     const existingRedemption = await CouponRedemption.findOne(
       { couponId: coupon._id, orderId: orderObjId },
       null,
-      opts
+      opts,
     );
     if (existingRedemption) {
       return { success: true, alreadyUsed: true };
@@ -426,7 +478,7 @@ export async function consumeReservedCoupon({ code, orderId, userId = null, disc
     const reservation = await CouponReservation.findOne(
       { couponId: coupon._id, orderId: orderObjId, status: "active" },
       null,
-      opts
+      opts,
     );
     if (!reservation) {
       return { success: false, error: "RESERVATION_NOT_FOUND" };
@@ -448,7 +500,11 @@ export async function consumeReservedCoupon({ code, orderId, userId = null, disc
         limit: coupon.usagePerUser,
         session: tx,
       });
-      if (!usageRes.ok) return { success: false, error: usageRes.error || "COUPON_USER_LIMIT_REACHED" };
+      if (!usageRes.ok)
+        return {
+          success: false,
+          error: usageRes.error || "COUPON_USER_LIMIT_REACHED",
+        };
       usageUpdated = true;
     }
 
@@ -465,12 +521,16 @@ export async function consumeReservedCoupon({ code, orderId, userId = null, disc
             redeemedAt: new Date(),
           },
         ],
-        opts
+        opts,
       );
     } catch (e) {
       if (e.code === 11000) {
         if (usageUpdated) {
-          await decrementUserUsage({ couponId: coupon._id, userId: userObjId, session: tx });
+          await decrementUserUsage({
+            couponId: coupon._id,
+            userId: userObjId,
+            session: tx,
+          });
         }
         return { success: true, alreadyUsed: true };
       }
@@ -481,14 +541,14 @@ export async function consumeReservedCoupon({ code, orderId, userId = null, disc
     await CouponReservation.updateOne(
       { _id: reservation._id },
       { $set: { status: "consumed" } },
-      opts
+      opts,
     ).catch(() => {});
 
     // Decrement reservedCount only if > 0, increment usedCount (prevents negative reservedCount)
     await Coupon.updateOne(
       { _id: coupon._id, reservedCount: { $gt: 0 } },
       { $inc: { reservedCount: -1, usedCount: 1 } },
-      opts
+      opts,
     ).catch((e) => {
       console.warn("[coupon] counter update failed:", String(e?.message || e));
     });
@@ -513,7 +573,9 @@ function isActiveByDates(doc, now = new Date()) {
 }
 
 function normalizeKey(raw) {
-  const v = String(raw || "").trim().toLowerCase();
+  const v = String(raw || "")
+    .trim()
+    .toLowerCase();
   if (!v) return "";
   return v
     .replace(/\s+/g, "_")
@@ -582,9 +644,12 @@ function legacyAttributesObject(list) {
   for (const a of list || []) {
     const key = String(a?.key || "");
     const val = a?.value;
-    if (key === "volume_ml" && Number.isFinite(Number(val))) obj.volumeMl = Number(val);
-    if (key === "weight_g" && Number.isFinite(Number(val))) obj.weightG = Number(val);
-    if (key === "pack_count" && Number.isFinite(Number(val))) obj.packCount = Number(val);
+    if (key === "volume_ml" && Number.isFinite(Number(val)))
+      obj.volumeMl = Number(val);
+    if (key === "weight_g" && Number.isFinite(Number(val)))
+      obj.weightG = Number(val);
+    if (key === "pack_count" && Number.isFinite(Number(val)))
+      obj.packCount = Number(val);
     if (key === "scent" && typeof val === "string") obj.scent = val;
     if (key === "hold_level" && typeof val === "string") obj.holdLevel = val;
     if (key === "finish_type" && typeof val === "string") obj.finishType = val;
@@ -625,10 +690,12 @@ export function computeEffectiveUnitPriceMinor(p, variant, now = new Date()) {
   // ✅ FIX: Only use variant priceOverride if it's explicitly set AND > 0
   // A value of 0 means "no override" (fall back to product price)
   const variantOverrideMinor = Number(variant?.priceOverrideMinor);
-  const hasValidOverrideMinor = Number.isFinite(variantOverrideMinor) && variantOverrideMinor > 0;
+  const hasValidOverrideMinor =
+    Number.isFinite(variantOverrideMinor) && variantOverrideMinor > 0;
 
   const variantOverrideMajor = Number(variant?.priceOverride);
-  const hasValidOverrideMajor = Number.isFinite(variantOverrideMajor) && variantOverrideMajor > 0;
+  const hasValidOverrideMajor =
+    Number.isFinite(variantOverrideMajor) && variantOverrideMajor > 0;
 
   const baseMinor = hasValidOverrideMinor
     ? variantOverrideMinor
@@ -665,11 +732,16 @@ function computePercentDiscountMinor(amountMinor, percent) {
 async function resolveShippingFeeMinor(shipping) {
   const mode = shipping?.mode;
 
-  if (!mode) throw makeErr(400, "MISSING_SHIPPING_MODE", "shipping.mode is required");
+  if (!mode)
+    throw makeErr(400, "MISSING_SHIPPING_MODE", "shipping.mode is required");
 
   if (mode === "DELIVERY") {
     if (!shipping?.deliveryAreaId) {
-      throw makeErr(400, "MISSING_DELIVERY_AREA", "deliveryAreaId is required for DELIVERY");
+      throw makeErr(
+        400,
+        "MISSING_DELIVERY_AREA",
+        "deliveryAreaId is required for DELIVERY",
+      );
     }
 
     const area = await DeliveryArea.findById(shipping.deliveryAreaId).lean();
@@ -682,7 +754,11 @@ async function resolveShippingFeeMinor(shipping) {
 
   if (mode === "PICKUP_POINT") {
     if (!shipping?.pickupPointId) {
-      throw makeErr(400, "MISSING_PICKUP_POINT", "pickupPointId is required for PICKUP_POINT");
+      throw makeErr(
+        400,
+        "MISSING_PICKUP_POINT",
+        "pickupPointId is required for PICKUP_POINT",
+      );
     }
 
     const point = await PickupPoint.findById(shipping.pickupPointId).lean();
@@ -694,7 +770,9 @@ async function resolveShippingFeeMinor(shipping) {
   }
 
   if (mode === "STORE_PICKUP") {
-    const cfg = await StorePickupConfig.findOne().sort({ createdAt: -1 }).lean();
+    const cfg = await StorePickupConfig.findOne()
+      .sort({ createdAt: -1 })
+      .lean();
     if (cfg && cfg.isEnabled) return toMinor(cfg.fee || 0);
     return 0;
   }
@@ -721,7 +799,8 @@ async function resolveCampaignDiscountMinor({ lineItems, subtotalMinor }) {
   // Filter by active date range
   const activeCampaigns = campaigns.filter((c) => isActiveByDates(c, now));
 
-  if (!activeCampaigns.length) return { amountMinor: 0, campaignId: null, campaignName: null };
+  if (!activeCampaigns.length)
+    return { amountMinor: 0, campaignId: null, campaignName: null };
 
   // Calculate potential discount for each campaign to enable deterministic tie-breaking
   const campaignsWithDiscount = activeCampaigns.map((campaign) => {
@@ -736,13 +815,17 @@ async function resolveCampaignDiscountMinor({ lineItems, subtotalMinor }) {
       }
 
       if (campaign.appliesTo === "products") {
-        const hit = campaign.productIds?.some((id) => id.toString() === li.productId);
+        const hit = campaign.productIds?.some(
+          (id) => id.toString() === li.productId,
+        );
         if (hit) eligibleMinor += lineMinor;
         continue;
       }
 
       if (campaign.appliesTo === "categories") {
-        const hit = campaign.categoryIds?.some((id) => id.toString() === li.categoryId);
+        const hit = campaign.categoryIds?.some(
+          (id) => id.toString() === li.categoryId,
+        );
         if (hit) eligibleMinor += lineMinor;
         continue;
       }
@@ -751,9 +834,15 @@ async function resolveCampaignDiscountMinor({ lineItems, subtotalMinor }) {
     let potentialDiscount = 0;
     if (eligibleMinor > 0) {
       if (campaign.type === "percent") {
-        potentialDiscount = computePercentDiscountMinor(eligibleMinor, campaign.value);
+        potentialDiscount = computePercentDiscountMinor(
+          eligibleMinor,
+          campaign.value,
+        );
       } else {
-        potentialDiscount = Math.min(eligibleMinor, toMinor(campaign.value || 0));
+        potentialDiscount = Math.min(
+          eligibleMinor,
+          toMinor(campaign.value || 0),
+        );
       }
       potentialDiscount = Math.min(potentialDiscount, subtotalMinor);
     }
@@ -767,9 +856,13 @@ async function resolveCampaignDiscountMinor({ lineItems, subtotalMinor }) {
     const priorityB = b.campaign.priority ?? 100;
     if (priorityA !== priorityB) return priorityA - priorityB;
     // Higher discount wins
-    if (b.potentialDiscount !== a.potentialDiscount) return b.potentialDiscount - a.potentialDiscount;
+    if (b.potentialDiscount !== a.potentialDiscount)
+      return b.potentialDiscount - a.potentialDiscount;
     // createdAt DESC (newer first) - already sorted but ensure
-    return (b.campaign.createdAt?.getTime?.() || 0) - (a.campaign.createdAt?.getTime?.() || 0);
+    return (
+      (b.campaign.createdAt?.getTime?.() || 0) -
+      (a.campaign.createdAt?.getTime?.() || 0)
+    );
   });
 
   // Pick the best campaign (first one after sorting)
@@ -803,7 +896,8 @@ async function resolveCouponDiscountMinor({ code, baseMinor }) {
   const meetsMin = Number(baseMinor || 0) >= minMinor;
 
   const meetsUsage =
-    coupon.usageLimit == null || Number(coupon.usedCount || 0) < Number(coupon.usageLimit || 0);
+    coupon.usageLimit == null ||
+    Number(coupon.usedCount || 0) < Number(coupon.usageLimit || 0);
 
   if (!meetsMin || !meetsUsage) return { code: null, amountMinor: 0 };
 
@@ -833,25 +927,35 @@ async function checkCouponAvailability(code, userId = null) {
 
   const normalized = raw.toUpperCase();
   const coupon = await Coupon.findOne({ code: normalized })
-    .select("usageLimit usedCount reservedCount usagePerUser startAt endAt isActive")
+    .select(
+      "usageLimit usedCount reservedCount usagePerUser startAt endAt isActive",
+    )
     .lean();
   if (!coupon) return { available: true };
   if (!isActiveByDates(coupon, new Date())) return { available: true };
 
   const used = Number(coupon.usedCount || 0);
   const reserved = Number(coupon.reservedCount || 0);
-  if (coupon.usageLimit != null && used + reserved >= Number(coupon.usageLimit)) {
+  if (
+    coupon.usageLimit != null &&
+    used + reserved >= Number(coupon.usageLimit)
+  ) {
     return { available: false, reason: "limit_reached" };
   }
 
   if (userId && coupon.usagePerUser != null) {
-    const userObjId = mongoose.Types.ObjectId.isValid(userId) ? new mongoose.Types.ObjectId(userId) : null;
+    const userObjId = mongoose.Types.ObjectId.isValid(userId)
+      ? new mongoose.Types.ObjectId(userId)
+      : null;
     if (userObjId) {
       const usage = await CouponUserUsage.findOne(
         { couponId: coupon._id, userId: userObjId },
-        { usedCount: 1 }
+        { usedCount: 1 },
       ).lean();
-      if (usage && Number(usage.usedCount || 0) >= Number(coupon.usagePerUser)) {
+      if (
+        usage &&
+        Number(usage.usedCount || 0) >= Number(coupon.usagePerUser)
+      ) {
         return { available: false, reason: "user_limit_reached" };
       }
     }
@@ -867,18 +971,30 @@ async function checkCouponAvailability(code, userId = null) {
 async function resolveGifts({ totalBeforeShippingMajor, lineItems }) {
   const now = new Date();
 
-  const giftsDocs = await Gift.find({ isActive: true }).sort({ createdAt: -1 }).limit(20).lean();
+  const giftsDocs = await Gift.find({ isActive: true })
+    .sort({ createdAt: -1 })
+    .limit(20)
+    .lean();
   const activeGifts = giftsDocs.filter((g) => isActiveByDates(g, now));
 
   const cartProductIds = new Set(lineItems.map((x) => x.productId));
-  const cartCategoryIds = new Set(lineItems.map((x) => x.categoryId).filter(Boolean));
+  const cartCategoryIds = new Set(
+    lineItems.map((x) => x.categoryId).filter(Boolean),
+  );
 
   const matchedGiftRequests = [];
 
   for (const g of activeGifts) {
-    const byTotal = g.minOrderTotal != null ? totalBeforeShippingMajor >= Number(g.minOrderTotal) : true;
-    const byProduct = g.requiredProductId ? cartProductIds.has(g.requiredProductId.toString()) : true;
-    const byCategory = g.requiredCategoryId ? cartCategoryIds.has(g.requiredCategoryId.toString()) : true;
+    const byTotal =
+      g.minOrderTotal != null
+        ? totalBeforeShippingMajor >= Number(g.minOrderTotal)
+        : true;
+    const byProduct = g.requiredProductId
+      ? cartProductIds.has(g.requiredProductId.toString())
+      : true;
+    const byCategory = g.requiredCategoryId
+      ? cartCategoryIds.has(g.requiredCategoryId.toString())
+      : true;
 
     if (byTotal && byProduct && byCategory && g.giftProductId) {
       const ruleQty = clampInt(g.qty ?? 1, 1, 50);
@@ -895,7 +1011,9 @@ async function resolveGifts({ totalBeforeShippingMajor, lineItems }) {
 
   if (!matchedGiftRequests.length) return { gifts: [], giftWarnings: [] };
 
-  const giftProductIds = [...new Set(matchedGiftRequests.map((x) => x.productId))];
+  const giftProductIds = [
+    ...new Set(matchedGiftRequests.map((x) => x.productId)),
+  ];
   const giftProducts = await Product.find({
     _id: { $in: giftProductIds },
     isActive: true,
@@ -924,7 +1042,7 @@ async function resolveGifts({ totalBeforeShippingMajor, lineItems }) {
     let availableStock = 0;
     if (req.variantId) {
       const variant = (product.variants || []).find(
-        (v) => v._id && String(v._id) === String(req.variantId)
+        (v) => v._id && String(v._id) === String(req.variantId),
       );
       if (!variant) {
         giftWarnings.push({
@@ -1012,6 +1130,45 @@ function mergeGifts(gifts) {
 }
 
 /**
+ * Resolve per-customer custom price for a specific product.
+ * Returns price in minor units (agorot) or null if no custom pricing exists.
+ */
+function resolveCustomPriceMinor(user, productId) {
+  if (!user?.customPricing || !Array.isArray(user.customPricing)) return null;
+  const entry = user.customPricing.find(
+    (cp) => String(cp.productId) === String(productId) && Number(cp.price) > 0,
+  );
+  if (!entry) return null;
+  return toMinor(entry.price);
+}
+
+/**
+ * Resolve wholesale unit price for a B2B user.
+ * Returns price in minor units (agorot) or null if no wholesale pricing applies.
+ * Checks custom pricing first, then falls back to tier pricing.
+ */
+function resolveWholesalePriceMinor(product, tier, qty, user) {
+  // Check per-customer custom pricing first
+  const customPrice = resolveCustomPriceMinor(user, product._id);
+  if (customPrice !== null) return customPrice;
+
+  if (!tier || tier === "none") return null;
+  if (
+    !Array.isArray(product.wholesalePricing) ||
+    product.wholesalePricing.length === 0
+  )
+    return null;
+
+  const tierEntry = product.wholesalePricing.find(
+    (wp) =>
+      wp.tier === tier && Number(wp.price) > 0 && qty >= Number(wp.minQty || 1),
+  );
+
+  if (!tierEntry) return null;
+  return toMinor(tierEntry.price);
+}
+
+/**
  * ✅ SINGLE SOURCE OF TRUTH FOR PRICING
  * Required Output:
  * {
@@ -1028,15 +1185,25 @@ function mergeGifts(gifts) {
  *
  * Additive: items[] returned for order creation + UI
  */
-export async function quotePricing({ cartItems, shipping, couponCode, userId = null }) {
+export async function quotePricing({
+  cartItems,
+  shipping,
+  couponCode,
+  userId = null,
+}) {
   const now = new Date();
-  const vatEnabled = String(process.env.ENABLE_VAT ?? "true").trim().toLowerCase() !== "false";
+  const vatEnabled =
+    String(process.env.ENABLE_VAT ?? "true")
+      .trim()
+      .toLowerCase() !== "false";
   const vatRateRaw = Number(process.env.VAT_RATE ?? 0.18);
   const vatRate = vatEnabled ? Math.min(1, Math.max(0, vatRateRaw)) : 0;
 
   // ✅ Load VAT mode from settings (default true for IL B2C)
   const settings = await SiteSettings.findOne().lean();
-  const pricesIncludeVat = Boolean(settings?.pricingRules?.pricesIncludeVat ?? true);
+  const pricesIncludeVat = Boolean(
+    settings?.pricingRules?.pricesIncludeVat ?? true,
+  );
 
   if (!Array.isArray(cartItems) || cartItems.length === 0) {
     throw makeErr(400, "EMPTY_CART", "cartItems is required");
@@ -1045,9 +1212,7 @@ export async function quotePricing({ cartItems, shipping, couponCode, userId = n
   // 1) Load products (active and not deleted)
   const ids = [
     ...new Set(
-      cartItems
-        .map((x) => String(x?.productId || "").trim())
-        .filter(Boolean)
+      cartItems.map((x) => String(x?.productId || "").trim()).filter(Boolean),
     ),
   ];
 
@@ -1061,6 +1226,22 @@ export async function quotePricing({ cartItems, shipping, couponCode, userId = n
     isDeleted: { $ne: true },
   }).lean();
   const byId = new Map(products.map((p) => [p._id.toString(), p]));
+
+  // B2B wholesale tier resolution
+  let wholesaleTier = "none";
+  let b2bUser = null;
+  if (userId) {
+    b2bUser = await User.findById(userId)
+      .select("wholesaleTier b2bApproved customPricing")
+      .lean();
+    if (
+      b2bUser?.b2bApproved &&
+      b2bUser?.wholesaleTier &&
+      b2bUser.wholesaleTier !== "none"
+    ) {
+      wholesaleTier = b2bUser.wholesaleTier;
+    }
+  }
 
   const items = [];
   let subtotalMinor = 0;
@@ -1079,10 +1260,16 @@ export async function quotePricing({ cartItems, shipping, couponCode, userId = n
       : null;
 
     if (hasVariants && !variant) {
-      throw makeErr(400, "VARIANT_REQUIRED", "variantId is required for this product");
+      throw makeErr(
+        400,
+        "VARIANT_REQUIRED",
+        "variantId is required for this product",
+      );
     }
 
-    const stock = hasVariants ? clampInt(variant?.stock ?? 0, 0, 999999) : clampInt(p.stock ?? 0, 0, 999999);
+    const stock = hasVariants
+      ? clampInt(variant?.stock ?? 0, 0, 999999)
+      : clampInt(p.stock ?? 0, 0, 999999);
     const requestedQty = clampInt(c?.qty ?? 1, 1, 999);
 
     /**
@@ -1092,33 +1279,53 @@ export async function quotePricing({ cartItems, shipping, couponCode, userId = n
      */
     if (stock <= 0) {
       throw makeErr(409, "OUT_OF_STOCK", "Product is out of stock", {
-        items: [{
-          productId: p._id.toString(),
-          variantId: variant ? String(variant?._id || "") : null,
-          titleHe: p.titleHe || p.title || "",
-          titleAr: p.titleAr || "",
-          requested: requestedQty,
-          available: 0,
-        }],
+        items: [
+          {
+            productId: p._id.toString(),
+            variantId: variant ? String(variant?._id || "") : null,
+            titleHe: p.titleHe || p.title || "",
+            titleAr: p.titleAr || "",
+            requested: requestedQty,
+            available: 0,
+          },
+        ],
       });
     }
 
     if (requestedQty > stock) {
-      throw makeErr(409, "OUT_OF_STOCK_PARTIAL", "Requested quantity exceeds available stock", {
-        items: [{
-          productId: p._id.toString(),
-          variantId: variant ? String(variant?._id || "") : null,
-          titleHe: p.titleHe || p.title || "",
-          titleAr: p.titleAr || "",
-          requested: requestedQty,
-          available: stock,
-        }],
-      });
+      throw makeErr(
+        409,
+        "OUT_OF_STOCK_PARTIAL",
+        "Requested quantity exceeds available stock",
+        {
+          items: [
+            {
+              productId: p._id.toString(),
+              variantId: variant ? String(variant?._id || "") : null,
+              titleHe: p.titleHe || p.title || "",
+              titleAr: p.titleAr || "",
+              requested: requestedQty,
+              available: stock,
+            },
+          ],
+        },
+      );
     }
 
     const allowedQty = requestedQty; // No silent reduction
 
-    const unitMinor = computeEffectiveUnitPriceMinor(p, variant, now);
+    // B2B wholesale price takes precedence over regular/sale pricing
+    const wholesaleMinor = resolveWholesalePriceMinor(
+      p,
+      wholesaleTier,
+      allowedQty,
+      b2bUser,
+    );
+    const retailMinor = computeEffectiveUnitPriceMinor(p, variant, now);
+    const unitMinor =
+      wholesaleMinor !== null
+        ? Math.min(wholesaleMinor, retailMinor)
+        : retailMinor;
     const lineMinor = unitMinor * allowedQty;
 
     const attributesList = variant ? normalizeAttributesList(variant) : [];
@@ -1168,12 +1375,18 @@ export async function quotePricing({ cartItems, shipping, couponCode, userId = n
    * Each step applies to the amount left after the previous. Frontend/API docs assume this order.
    */
   // 3) Campaign
-  const campaign = await resolveCampaignDiscountMinor({ lineItems: items, subtotalMinor });
+  const campaign = await resolveCampaignDiscountMinor({
+    lineItems: items,
+    subtotalMinor,
+  });
   const campaignMinor = Math.max(0, campaign.amountMinor || 0);
   const afterCampaignMinor = Math.max(0, subtotalMinor - campaignMinor);
 
   // 4) Coupon
-  const coupon = await resolveCouponDiscountMinor({ code: couponCode, baseMinor: afterCampaignMinor });
+  const coupon = await resolveCouponDiscountMinor({
+    code: couponCode,
+    baseMinor: afterCampaignMinor,
+  });
   const couponMinor = Math.max(0, coupon.amountMinor || 0);
   const afterCouponMinor = Math.max(0, afterCampaignMinor - couponMinor);
 
@@ -1187,16 +1400,24 @@ export async function quotePricing({ cartItems, shipping, couponCode, userId = n
     })) || {};
 
   const offersDiscountMajorRaw = Number(offersRes.offersDiscount || 0);
-  const offerAmountMinorRaw = toMinor(Number.isFinite(offersDiscountMajorRaw) ? offersDiscountMajorRaw : 0);
+  const offerAmountMinorRaw = toMinor(
+    Number.isFinite(offersDiscountMajorRaw) ? offersDiscountMajorRaw : 0,
+  );
 
   // ✅ IMPORTANT: offer discount must not exceed current subtotal-after-coupon
-  const offerAmountMinor = Math.min(afterCouponMinor, Math.max(0, offerAmountMinorRaw));
+  const offerAmountMinor = Math.min(
+    afterCouponMinor,
+    Math.max(0, offerAmountMinorRaw),
+  );
 
   const freeShipping = Boolean(offersRes.freeShipping);
   if (freeShipping) shippingFeeMinor = 0;
 
   // 6) Gifts
-  const totalBeforeShippingMinor = Math.max(0, afterCouponMinor - offerAmountMinor);
+  const totalBeforeShippingMinor = Math.max(
+    0,
+    afterCouponMinor - offerAmountMinor,
+  );
   const totalBeforeShippingMajor = fromMinor(totalBeforeShippingMinor);
 
   const giftsFromRulesResult = await resolveGifts({
@@ -1207,8 +1428,12 @@ export async function quotePricing({ cartItems, shipping, couponCode, userId = n
   const giftsFromRules = giftsFromRulesResult.gifts || [];
   const giftWarningsFromRules = giftsFromRulesResult.giftWarnings || [];
 
-  const offerGifts = Array.isArray(offersRes.offerGifts) ? offersRes.offerGifts : [];
-  const offerGiftWarnings = Array.isArray(offersRes.offerGiftWarnings) ? offersRes.offerGiftWarnings : [];
+  const offerGifts = Array.isArray(offersRes.offerGifts)
+    ? offersRes.offerGifts
+    : [];
+  const offerGiftWarnings = Array.isArray(offersRes.offerGiftWarnings)
+    ? offersRes.offerGiftWarnings
+    : [];
 
   const gifts = mergeGifts([
     ...giftsFromRules.map((g) => ({
@@ -1245,7 +1470,10 @@ export async function quotePricing({ cartItems, shipping, couponCode, userId = n
       // ✅ VAT-INCLUSIVE: Catalog prices already include VAT (IL B2C default)
       // totalMinor is the final amount including VAT
       totalAfterVatMinor = totalMinor;
-      totalBeforeVatMinor = Math.max(0, Math.round(totalAfterVatMinor / (1 + vatRate)));
+      totalBeforeVatMinor = Math.max(
+        0,
+        Math.round(totalAfterVatMinor / (1 + vatRate)),
+      );
       vatAmountMinor = Math.max(0, totalAfterVatMinor - totalBeforeVatMinor);
     } else {
       // ✅ VAT-EXCLUSIVE: Catalog prices are net, VAT is added on top
@@ -1265,10 +1493,11 @@ export async function quotePricing({ cartItems, shipping, couponCode, userId = n
 
   // ✅ Assertion in dev/test: Verify VAT math equality holds
   if (process.env.NODE_ENV !== "production") {
-    const vatEquality = totalBeforeVatMinor + vatAmountMinor === totalAfterVatMinor;
+    const vatEquality =
+      totalBeforeVatMinor + vatAmountMinor === totalAfterVatMinor;
     if (!vatEquality) {
       console.error(
-        `[pricing.service] VAT MATH ASSERTION FAILED: ${totalBeforeVatMinor} + ${vatAmountMinor} !== ${totalAfterVatMinor}`
+        `[pricing.service] VAT MATH ASSERTION FAILED: ${totalBeforeVatMinor} + ${vatAmountMinor} !== ${totalAfterVatMinor}`,
       );
     }
   }
@@ -1316,14 +1545,21 @@ export async function quotePricing({ cartItems, shipping, couponCode, userId = n
       campaignName: campaign.campaignName || null,
 
       // ✅ Applied offers transparency (Goal 6)
-      appliedOffers: Array.isArray(offersRes.appliedOffers) ? offersRes.appliedOffers : [],
+      appliedOffers: Array.isArray(offersRes.appliedOffers)
+        ? offersRes.appliedOffers
+        : [],
 
       // Gift warnings (out of stock, partial stock, etc.)
       giftWarnings: giftWarnings.length > 0 ? giftWarnings : [],
 
       // ✅ Coupon availability (early warning: can this coupon be reserved at checkout?)
       ...(couponCode && String(couponCode).trim()
-        ? { couponAvailability: await checkCouponAvailability(couponCode, userId) }
+        ? {
+            couponAvailability: await checkCouponAvailability(
+              couponCode,
+              userId,
+            ),
+          }
         : {}),
     },
   };

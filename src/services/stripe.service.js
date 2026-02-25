@@ -28,7 +28,12 @@ function getStripe() {
   if (stripeClient) return stripeClient;
 
   const key = process.env.STRIPE_SECRET_KEY;
-  if (!key) throw makeErr(500, "STRIPE_NOT_CONFIGURED", "STRIPE_SECRET_KEY is required");
+  if (!key)
+    throw makeErr(
+      500,
+      "STRIPE_NOT_CONFIGURED",
+      "STRIPE_SECRET_KEY is required",
+    );
 
   /**
    * apiVersion: keep stable. If you change, adjust fields accordingly.
@@ -82,10 +87,15 @@ function allocateDiscountAcrossItems({ linesMinor, totalDiscountMinor }) {
 
   const subtotalMinor = linesMinor.reduce((a, b) => a + b, 0);
   if (subtotalMinor <= 0) {
-    return { perLineDiscountMinor: linesMinor.map(() => 0), remainderMinor: totalDiscountMinor };
+    return {
+      perLineDiscountMinor: linesMinor.map(() => 0),
+      remainderMinor: totalDiscountMinor,
+    };
   }
 
-  const raw = linesMinor.map((line) => (totalDiscountMinor * line) / subtotalMinor);
+  const raw = linesMinor.map(
+    (line) => (totalDiscountMinor * line) / subtotalMinor,
+  );
   const floors = raw.map((x) => Math.floor(x));
   let used = floors.reduce((a, b) => a + b, 0);
   let remainder = totalDiscountMinor - used;
@@ -161,7 +171,13 @@ function normalizeUrlBase(raw) {
  *   items:[{ productId, qty, unitPrice, titleHe, titleAr, title }]
  * }
  */
-export async function createCheckoutSession({ orderId, quote, lang, idempotencyKey }) {
+export async function createCheckoutSession({
+  orderId,
+  quote,
+  lang,
+  idempotencyKey,
+  customerEmail,
+}) {
   const stripe = getStripe();
 
   if (!orderId) throw makeErr(400, "MISSING_ORDER_ID", "orderId is required");
@@ -182,7 +198,10 @@ export async function createCheckoutSession({ orderId, quote, lang, idempotencyK
 
   // Quote truth: total = subtotal - discounts + shipping
   const totalBeforeShippingMinor = Math.max(0, totalMinor - shippingMinor);
-  const totalDiscountMinor = Math.max(0, subtotalMinor - totalBeforeShippingMinor);
+  const totalDiscountMinor = Math.max(
+    0,
+    subtotalMinor - totalBeforeShippingMinor,
+  );
 
   // Base line totals in minor
   const linesMinor = quote.items.map((it) => {
@@ -205,7 +224,10 @@ export async function createCheckoutSession({ orderId, quote, lang, idempotencyK
     const qty = Math.max(1, Math.min(999, Number(it.qty || 1)));
 
     const originalLineMinor = linesMinor[i];
-    const discountMinor = Math.min(perLineDiscountMinor[i] || 0, originalLineMinor);
+    const discountMinor = Math.min(
+      perLineDiscountMinor[i] || 0,
+      originalLineMinor,
+    );
     const adjustedLineMinor = Math.max(0, originalLineMinor - discountMinor);
 
     // distribute adjusted line per unit, handle remainder
@@ -266,7 +288,10 @@ export async function createCheckoutSession({ orderId, quote, lang, idempotencyK
   }
 
   // Ensure sum(line_items) === totalMinor
-  const { diff } = verifyStripeTotal({ quoteTotalMinor: totalMinor, line_items });
+  const { diff } = verifyStripeTotal({
+    quoteTotalMinor: totalMinor,
+    line_items,
+  });
 
   if (diff !== 0) {
     // if negative diff => line_items exceed total => fatal bug
@@ -275,7 +300,7 @@ export async function createCheckoutSession({ orderId, quote, lang, idempotencyK
         500,
         "STRIPE_TOTAL_MISMATCH",
         `Stripe line items exceed quote.total (diff=${fromMinorUnits(diff)})`,
-        { diffMinor: diff }
+        { diffMinor: diff },
       );
     }
 
@@ -298,10 +323,15 @@ export async function createCheckoutSession({ orderId, quote, lang, idempotencyK
   const devFallback = "http://localhost:5173";
   const isProd = process.env.NODE_ENV === "production";
 
-  const base = normalizeUrlBase(envBase) || (isProd ? productionFallback : devFallback);
+  const base =
+    normalizeUrlBase(envBase) || (isProd ? productionFallback : devFallback);
 
-  const successPath = String(process.env.STRIPE_SUCCESS_PATH || "/checkout/success");
-  const cancelPath = String(process.env.STRIPE_CANCEL_PATH || "/checkout/cancel");
+  const successPath = String(
+    process.env.STRIPE_SUCCESS_PATH || "/checkout/success",
+  );
+  const cancelPath = String(
+    process.env.STRIPE_CANCEL_PATH || "/checkout/cancel",
+  );
 
   const successUrl = `${base}${successPath}?orderId=${encodeURIComponent(String(orderId))}`;
   const cancelUrl = `${base}${cancelPath}?orderId=${encodeURIComponent(String(orderId))}`;
@@ -319,18 +349,20 @@ export async function createCheckoutSession({ orderId, quote, lang, idempotencyK
     success_url: successUrl,
     cancel_url: cancelUrl,
     metadata,
-
-    /**
-     * Optional additions:
-     * - billing_address_collection: "auto"
-     * - phone_number_collection: { enabled: true }
-     */
+    ...(customerEmail ? { customer_email: customerEmail } : {}),
+    billing_address_collection: "auto",
+    phone_number_collection: { enabled: true },
   };
 
-  const createOpts = idempotencyKey ? { idempotencyKey: String(idempotencyKey) } : undefined;
+  const createOpts = idempotencyKey
+    ? { idempotencyKey: String(idempotencyKey) }
+    : undefined;
 
   try {
-    const session = await stripe.checkout.sessions.create(createParams, createOpts);
+    const session = await stripe.checkout.sessions.create(
+      createParams,
+      createOpts,
+    );
     return session;
   } catch (e) {
     const msg = e?.message || "Stripe checkout session create failed";
@@ -348,7 +380,11 @@ export function constructWebhookEvent(rawBody, signature) {
   const secret = process.env.STRIPE_WEBHOOK_SECRET;
 
   if (!secret) {
-    throw makeErr(500, "STRIPE_WEBHOOK_NOT_CONFIGURED", "STRIPE_WEBHOOK_SECRET is required");
+    throw makeErr(
+      500,
+      "STRIPE_WEBHOOK_NOT_CONFIGURED",
+      "STRIPE_WEBHOOK_SECRET is required",
+    );
   }
 
   try {
@@ -378,9 +414,13 @@ function mapRefundReasonToStripe(reason) {
 /**
  * Retrieve Checkout Session by ID (expand payment_intent optionally)
  */
-export async function retrieveCheckoutSession(sessionId, { expandPaymentIntent = true } = {}) {
+export async function retrieveCheckoutSession(
+  sessionId,
+  { expandPaymentIntent = true } = {},
+) {
   const stripe = getStripe();
-  if (!sessionId) throw makeErr(400, "MISSING_SESSION_ID", "sessionId is required");
+  if (!sessionId)
+    throw makeErr(400, "MISSING_SESSION_ID", "sessionId is required");
 
   const expand = [];
   if (expandPaymentIntent) expand.push("payment_intent");
@@ -388,7 +428,7 @@ export async function retrieveCheckoutSession(sessionId, { expandPaymentIntent =
   try {
     const session = await stripe.checkout.sessions.retrieve(
       String(sessionId),
-      expand.length ? { expand } : undefined
+      expand.length ? { expand } : undefined,
     );
     return session;
   } catch (e) {
@@ -403,7 +443,8 @@ export async function retrieveCheckoutSession(sessionId, { expandPaymentIntent =
  */
 export async function retrievePaymentIntent(paymentIntentId) {
   const stripe = getStripe();
-  if (!paymentIntentId) throw makeErr(400, "MISSING_PAYMENT_INTENT", "paymentIntentId is required");
+  if (!paymentIntentId)
+    throw makeErr(400, "MISSING_PAYMENT_INTENT", "paymentIntentId is required");
 
   try {
     const pi = await stripe.paymentIntents.retrieve(String(paymentIntentId), {
@@ -452,7 +493,12 @@ export async function getReceiptUrlByPaymentIntent(paymentIntentId) {
  * @param reason - internal reason
  * @param idempotencyKey - optional
  */
-export async function createStripeRefund({ paymentIntentId, amountMajor, reason, idempotencyKey }) {
+export async function createStripeRefund({
+  paymentIntentId,
+  amountMajor,
+  reason,
+  idempotencyKey,
+}) {
   const stripe = getStripe();
 
   if (!paymentIntentId) {
@@ -472,7 +518,9 @@ export async function createStripeRefund({ paymentIntentId, amountMajor, reason,
     ...(stripeReason ? { reason: stripeReason } : {}),
   };
 
-  const opts = idempotencyKey ? { idempotencyKey: String(idempotencyKey) } : undefined;
+  const opts = idempotencyKey
+    ? { idempotencyKey: String(idempotencyKey) }
+    : undefined;
 
   try {
     const refund = await stripe.refunds.create(params, opts);

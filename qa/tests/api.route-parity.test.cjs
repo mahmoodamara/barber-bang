@@ -137,15 +137,24 @@ describe('API Route Parity - Security', () => {
   /* ============================
      SECTION 4: Checkout endpoints
   ============================ */
-  describe('Checkout endpoints - auth parity', () => {
+  describe('Checkout endpoints - guest/auth parity', () => {
     let deliveryAreaId;
+    let productId;
+    let userToken;
 
-    beforeAll(async () => {
+    beforeEach(async () => {
       const area = await createDeliveryArea();
       deliveryAreaId = area._id.toString();
+
+      const category = await createCategory();
+      const product = await createProduct({ categoryId: category._id.toString(), stock: 20 });
+      productId = product._id.toString();
+
+      const user = await createUser({ role: 'user', email: `checkout_user_${Date.now()}@test.com` });
+      userToken = await issueTokenForUser(user);
     });
 
-    const checkoutBody = () => ({
+    const checkoutBody = ({ withGuestContact = false, contactSuffix = '' } = {}) => ({
       shippingMode: 'DELIVERY',
       deliveryAreaId,
       address: {
@@ -154,42 +163,168 @@ describe('API Route Parity - Security', () => {
         city: 'Tel Aviv',
         street: 'Main St 1',
       },
+      ...(withGuestContact
+        ? {
+            guestContact: {
+              fullName: 'Guest User',
+              phone: '0501234567',
+              email: `guest_${contactSuffix || Date.now()}@test.com`,
+            },
+          }
+        : {}),
     });
 
-    test('POST /api/checkout/quote and /api/v1/checkout/quote both require auth', async () => {
+    async function importGuestCartModel() {
+      try {
+        const mod = await import(process.cwd() + '/src/models/GuestCart.js');
+        return mod.GuestCart;
+      } catch {
+        const mod = await import(process.cwd() + '/models/GuestCart.js');
+        return mod.GuestCart;
+      }
+    }
+
+    async function seedGuestCart(guestCartId) {
+      const GuestCart = await importGuestCartModel();
+      await GuestCart.create({
+        cartId: guestCartId,
+        items: [{ productId, qty: 1, variantId: '' }],
+        updatedAt: new Date(),
+      });
+    }
+
+    test('POST /api/checkout/quote and /api/v1/checkout/quote accept unauth and fail with validation error on invalid body', async () => {
       const app = global.__APP__;
 
       const [legacyRes, v1Res] = await Promise.all([
-        request(app).post('/api/checkout/quote').send(checkoutBody()),
-        request(app).post('/api/v1/checkout/quote').send(checkoutBody()),
+        request(app).post('/api/checkout/quote').send({}),
+        request(app).post('/api/v1/checkout/quote').send({}),
       ]);
 
-      expect(legacyRes.status).toBe(401);
-      expect(v1Res.status).toBe(401);
+      expect(legacyRes.status).toBe(400);
+      expect(v1Res.status).toBe(400);
+      expect(legacyRes.body?.error?.code).toBe('VALIDATION_ERROR');
+      expect(v1Res.body?.error?.code).toBe('VALIDATION_ERROR');
     });
 
-    test('POST /api/checkout/cod and /api/v1/checkout/cod both require auth', async () => {
+    test('POST /api/checkout/cod and /api/v1/checkout/cod accept unauth and fail with validation error on invalid body', async () => {
       const app = global.__APP__;
 
       const [legacyRes, v1Res] = await Promise.all([
-        request(app).post('/api/checkout/cod').send(checkoutBody()),
-        request(app).post('/api/v1/checkout/cod').send(checkoutBody()),
+        request(app).post('/api/checkout/cod').send({}),
+        request(app).post('/api/v1/checkout/cod').send({}),
       ]);
 
-      expect(legacyRes.status).toBe(401);
-      expect(v1Res.status).toBe(401);
+      expect(legacyRes.status).toBe(400);
+      expect(v1Res.status).toBe(400);
+      expect(legacyRes.body?.error?.code).toBe('VALIDATION_ERROR');
+      expect(v1Res.body?.error?.code).toBe('VALIDATION_ERROR');
     });
 
-    test('POST /api/checkout/stripe and /api/v1/checkout/stripe both require auth', async () => {
+    test('POST /api/checkout/stripe and /api/v1/checkout/stripe accept unauth and fail with validation error on invalid body', async () => {
       const app = global.__APP__;
 
       const [legacyRes, v1Res] = await Promise.all([
-        request(app).post('/api/checkout/stripe').send(checkoutBody()),
-        request(app).post('/api/v1/checkout/stripe').send(checkoutBody()),
+        request(app).post('/api/checkout/stripe').send({}),
+        request(app).post('/api/v1/checkout/stripe').send({}),
       ]);
 
-      expect(legacyRes.status).toBe(401);
-      expect(v1Res.status).toBe(401);
+      expect(legacyRes.status).toBe(400);
+      expect(v1Res.status).toBe(400);
+      expect(legacyRes.body?.error?.code).toBe('VALIDATION_ERROR');
+      expect(v1Res.body?.error?.code).toBe('VALIDATION_ERROR');
+    });
+
+    test('Unauthenticated guest with valid payload can quote on both paths', async () => {
+      const app = global.__APP__;
+      const guestCartId = `guest_quote_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+      await seedGuestCart(guestCartId);
+
+      const [legacyRes, v1Res] = await Promise.all([
+        request(app)
+          .post('/api/checkout/quote')
+          .set('x-guest-cart-id', guestCartId)
+          .send(checkoutBody()),
+        request(app)
+          .post('/api/v1/checkout/quote')
+          .set('x-guest-cart-id', guestCartId)
+          .send(checkoutBody()),
+      ]);
+
+      expect(legacyRes.status).toBe(200);
+      expect(v1Res.status).toBe(200);
+      expect(legacyRes.body?.ok).toBe(true);
+      expect(v1Res.body?.ok).toBe(true);
+    });
+
+    test('Unauthenticated guest with valid payload can submit COD on both paths', async () => {
+      const app = global.__APP__;
+      const legacyGuestCartId = `guest_cod_legacy_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+      const v1GuestCartId = `guest_cod_v1_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+      await seedGuestCart(legacyGuestCartId);
+      await seedGuestCart(v1GuestCartId);
+
+      const legacyRes = await request(app)
+        .post('/api/checkout/cod')
+        .set('x-guest-cart-id', legacyGuestCartId)
+        .send(checkoutBody({ withGuestContact: true, contactSuffix: 'legacy' }));
+
+      const v1Res = await request(app)
+        .post('/api/v1/checkout/cod')
+        .set('x-guest-cart-id', v1GuestCartId)
+        .send(checkoutBody({ withGuestContact: true, contactSuffix: 'v1' }));
+
+      expect(legacyRes.status).toBe(v1Res.status);
+      expect(legacyRes.status).not.toBe(401);
+      expect([200, 201]).toContain(legacyRes.status);
+    });
+
+    test('Unauthenticated guest with valid payload reaches Stripe checkout logic on both paths', async () => {
+      const app = global.__APP__;
+      const legacyGuestCartId = `guest_stripe_legacy_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+      const v1GuestCartId = `guest_stripe_v1_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+      await seedGuestCart(legacyGuestCartId);
+      await seedGuestCart(v1GuestCartId);
+
+      const legacyRes = await request(app)
+        .post('/api/checkout/stripe')
+        .set('x-guest-cart-id', legacyGuestCartId)
+        .send(checkoutBody({ withGuestContact: true, contactSuffix: 'stripe_legacy' }));
+
+      const v1Res = await request(app)
+        .post('/api/v1/checkout/stripe')
+        .set('x-guest-cart-id', v1GuestCartId)
+        .send(checkoutBody({ withGuestContact: true, contactSuffix: 'stripe_v1' }));
+
+      expect(legacyRes.status).toBe(v1Res.status);
+      expect(legacyRes.body?.error?.code).not.toBe('UNAUTHORIZED');
+      expect(v1Res.body?.error?.code).not.toBe('UNAUTHORIZED');
+    });
+
+    test('Authenticated checkout quote behavior remains unchanged on both paths', async () => {
+      const app = global.__APP__;
+      const cartRes = await request(app)
+        .post('/api/cart/add')
+        .set('Authorization', `Bearer ${userToken}`)
+        .send({ productId, qty: 1 });
+
+      expect(cartRes.status).toBe(200);
+
+      const [legacyRes, v1Res] = await Promise.all([
+        request(app)
+          .post('/api/checkout/quote')
+          .set('Authorization', `Bearer ${userToken}`)
+          .send(checkoutBody()),
+        request(app)
+          .post('/api/v1/checkout/quote')
+          .set('Authorization', `Bearer ${userToken}`)
+          .send(checkoutBody()),
+      ]);
+
+      expect(legacyRes.status).toBe(200);
+      expect(v1Res.status).toBe(200);
+      expect(legacyRes.body?.ok).toBe(true);
+      expect(v1Res.body?.ok).toBe(true);
     });
   });
 
@@ -607,7 +742,7 @@ describe('API Route Parity - Security', () => {
       }
     });
 
-    test('Cannot bypass checkout auth by using /api instead of /api/v1', async () => {
+    test('Checkout endpoints keep identical guest validation behavior on /api and /api/v1', async () => {
       const app = global.__APP__;
 
       const checkoutEndpoints = ['/checkout/quote', '/checkout/cod', '/checkout/stripe'];
@@ -618,9 +753,11 @@ describe('API Route Parity - Security', () => {
           request(app).post(`/api/v1${endpoint}`).send({}),
         ]);
 
-        // CRITICAL: Both must be 401
-        expect(legacyRes.status).toBe(401);
-        expect(v1Res.status).toBe(401);
+        // Guest checkout is allowed, but both paths must enforce the same validation contract.
+        expect(legacyRes.status).toBe(400);
+        expect(v1Res.status).toBe(400);
+        expect(legacyRes.body?.error?.code).toBe('VALIDATION_ERROR');
+        expect(v1Res.body?.error?.code).toBe('VALIDATION_ERROR');
       }
     });
   });

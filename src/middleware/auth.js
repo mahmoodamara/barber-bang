@@ -46,12 +46,18 @@ function normalizeJwtError(req, e) {
   const code = e?.code || "";
 
   if (code === "TOKEN_MISSING") {
-    return { status: 401, body: authError(req, "UNAUTHORIZED", "Missing token") };
+    return {
+      status: 401,
+      body: authError(req, "UNAUTHORIZED", "Missing token"),
+    };
   }
 
   // Token expired (same status, clearer message)
   if (name === "TokenExpiredError") {
-    return { status: 401, body: authError(req, "UNAUTHORIZED", "Token expired") };
+    return {
+      status: 401,
+      body: authError(req, "UNAUTHORIZED", "Token expired"),
+    };
   }
 
   // Default invalid token
@@ -82,7 +88,7 @@ export function requireAuth() {
 
       // Select only what we need (avoid leaking sensitive fields)
       const user = await User.findById(userId).select(
-        "_id name email role tokenVersion isBlocked permissions"
+        "_id name email role tokenVersion isBlocked permissions wholesaleTier b2bApproved",
       );
 
       if (!user) {
@@ -92,7 +98,9 @@ export function requireAuth() {
       }
 
       // tokenVersion revocation (logout / security reset)
-      if (Number(payload?.tokenVersion || 0) !== Number(user?.tokenVersion || 0)) {
+      if (
+        Number(payload?.tokenVersion || 0) !== Number(user?.tokenVersion || 0)
+      ) {
         return res
           .status(401)
           .json(authError(req, "UNAUTHORIZED", "Invalid token"));
@@ -102,7 +110,9 @@ export function requireAuth() {
       if (user.isBlocked) {
         return res
           .status(403)
-          .json(authError(req, "USER_BLOCKED", "Your account has been blocked"));
+          .json(
+            authError(req, "USER_BLOCKED", "Your account has been blocked"),
+          );
       }
 
       req.user = user;
@@ -131,9 +141,7 @@ export function requireRole(...roles) {
     }
 
     if (!allowed.has(req.user.role)) {
-      return res
-        .status(403)
-        .json(authError(req, "FORBIDDEN", "Access denied"));
+      return res.status(403).json(authError(req, "FORBIDDEN", "Access denied"));
     }
 
     return next();
@@ -141,6 +149,65 @@ export function requireRole(...roles) {
 }
 
 export { PERMISSIONS };
+
+/**
+ * optionalAuth — non-blocking auth middleware for guest-capable endpoints.
+ *
+ * Behaviour:
+ *  - No token present  → req.user = null, continues to next()
+ *  - Valid token       → req.user populated (same as requireAuth)
+ *  - Invalid / expired → req.user = null, continues (no 401)
+ *  - Blocked user      → req.user = null, continues (guest treatment)
+ *
+ * Use on routes that serve both authenticated and guest users
+ * (e.g. POST /checkout/quote, /checkout/cod, /checkout/stripe).
+ */
+export function optionalAuth() {
+  return async (req, res, next) => {
+    // Default: treat as guest
+    req.user = null;
+    req.auth = null;
+
+    const token = extractBearerToken(req);
+    if (!token) {
+      return next();
+    }
+
+    try {
+      const payload = verifyToken(token);
+      const userId = payload?.sub || payload?.userId;
+      if (!userId) return next();
+
+      const user = await User.findById(userId).select(
+        "_id name email role tokenVersion isBlocked permissions",
+      );
+      if (!user) return next();
+
+      // Revoked token (logged out / password changed)
+      if (
+        Number(payload?.tokenVersion || 0) !== Number(user?.tokenVersion || 0)
+      ) {
+        return next();
+      }
+
+      // Blocked users are treated as guests on optional routes
+      if (user.isBlocked) {
+        return next();
+      }
+
+      req.user = user;
+      req.auth = {
+        sub: String(user._id),
+        tokenVersion: Number(user.tokenVersion || 0),
+        role: user.role,
+      };
+    } catch {
+      // Any JWT error (expired, malformed) → guest mode, continue
+    }
+
+    return next();
+  };
+}
 
 /**
  * Check if user has specific permission(s).
@@ -172,19 +239,19 @@ export function requirePermission(...requiredPermissions) {
         return next();
       }
 
-      return res.status(403).json(
-        authError(
-          req,
-          "INSUFFICIENT_PERMISSIONS",
-          `Missing required permission(s): ${required.join(", ")}`
-        )
-      );
+      return res
+        .status(403)
+        .json(
+          authError(
+            req,
+            "INSUFFICIENT_PERMISSIONS",
+            `Missing required permission(s): ${required.join(", ")}`,
+          ),
+        );
     }
 
     // Regular users don't have admin permissions
-    return res
-      .status(403)
-      .json(authError(req, "FORBIDDEN", "Access denied"));
+    return res.status(403).json(authError(req, "FORBIDDEN", "Access denied"));
   };
 }
 
@@ -218,18 +285,18 @@ export function requireAnyPermission(...permissions) {
         return next();
       }
 
-      return res.status(403).json(
-        authError(
-          req,
-          "INSUFFICIENT_PERMISSIONS",
-          `Requires one of: ${any.join(", ")}`
-        )
-      );
+      return res
+        .status(403)
+        .json(
+          authError(
+            req,
+            "INSUFFICIENT_PERMISSIONS",
+            `Requires one of: ${any.join(", ")}`,
+          ),
+        );
     }
 
     // Regular users don't have admin permissions
-    return res
-      .status(403)
-      .json(authError(req, "FORBIDDEN", "Access denied"));
+    return res.status(403).json(authError(req, "FORBIDDEN", "Access denied"));
   };
 }

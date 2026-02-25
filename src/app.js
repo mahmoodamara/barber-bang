@@ -45,9 +45,17 @@ import wishlistRoutes from "./routes/wishlist.routes.js";
 import reviewsRoutes from "./routes/reviews.routes.js";
 import contentRoutes from "./routes/content.routes.js";
 import settingsRoutes from "./routes/settings.routes.js";
+import seoRoutes from "./routes/seo.routes.js";
+import seoStaticRoutes from "./routes/seo.static.routes.js";
+import newsletterRoutes from "./routes/newsletter.routes.js";
+import stockNotifyRoutes from "./routes/stock-notify.routes.js";
+import b2bRoutes from "./routes/b2b.routes.js";
 
 import { errorHandler, notFound, getRequestId } from "./middleware/error.js";
-import { getPrometheusMiddleware, getMetricsContent } from "./middleware/prometheus.js";
+import {
+  getPrometheusMiddleware,
+  getMetricsContent,
+} from "./middleware/prometheus.js";
 import { log, reqLogger } from "./utils/logger.js";
 import { normalizePath } from "./utils/path.js";
 
@@ -107,11 +115,14 @@ app.use((req, res, next) => {
     const durationMs = Date.now() - startTime;
 
     // Single structured log entry with all relevant fields
-    req.log.info({
-      statusCode,
-      durationMs,
-      contentLength: res.get("content-length") || 0,
-    }, `${method} ${canonicalPath}`);
+    req.log.info(
+      {
+        statusCode,
+        durationMs,
+        contentLength: res.get("content-length") || 0,
+      },
+      `${method} ${canonicalPath}`,
+    );
   });
   next();
 });
@@ -133,7 +144,8 @@ app.use((req, res, next) => {
 /**
  * ✅ Prometheus metrics (early so webhook and all routes are timed)
  */
-const metricsEnabled = String(process.env.ENABLE_METRICS || "false").toLowerCase() === "true";
+const metricsEnabled =
+  String(process.env.ENABLE_METRICS || "false").toLowerCase() === "true";
 if (metricsEnabled) {
   app.use(getPrometheusMiddleware());
 }
@@ -229,7 +241,10 @@ const localhostOrigins = new Set([
 ]);
 
 // Production frontend origins (always allowed)
-const productionOrigins = new Set(["http://localhost:8080", "https://barber-bang.netlify.app"]);
+const productionOrigins = new Set([
+  "http://localhost:8080",
+  "https://barber-bang.netlify.app",
+]);
 
 const allowedOrigins = new Set(corsOriginList);
 // Always allow production frontend origins
@@ -246,7 +261,10 @@ const corsConfig = {
     if (allowedOrigins.has(origin)) return cb(null, true);
 
     // Log rejected origins for debugging
-    log.warn({ origin, allowedOrigins: [...allowedOrigins] }, "[cors] Origin rejected");
+    log.warn(
+      { origin, allowedOrigins: [...allowedOrigins] },
+      "[cors] Origin rejected",
+    );
 
     const err = new Error("CORS_NOT_ALLOWED");
     err.statusCode = 403;
@@ -255,7 +273,12 @@ const corsConfig = {
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "Idempotency-Key", "Accept-Language"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "Idempotency-Key",
+    "Accept-Language",
+  ],
 };
 
 app.use(cors(corsConfig));
@@ -290,7 +313,10 @@ function legacyApiDeprecation(req, res, next) {
   res.setHeader("X-API-Deprecated", "true");
   if (!legacyApiWarned) {
     legacyApiWarned = true;
-    log.warn({ path: req.url }, "[api] Legacy /api routes are deprecated. Use /api/v1.");
+    log.warn(
+      { path: req.url },
+      "[api] Legacy /api routes are deprecated. Use /api/v1.",
+    );
   }
   return next();
 }
@@ -357,6 +383,10 @@ apiRouter.use("/reviews", requireAuth(), reviewsRoutes);
 apiRouter.use("/content", contentRoutes);
 apiRouter.use("/collections", collectionsRoutes);
 apiRouter.use("/settings", settingsRoutes);
+apiRouter.use("/seo", seoRoutes);
+apiRouter.use("/newsletter", newsletterRoutes);
+apiRouter.use("/stock-notify", stockNotifyRoutes);
+apiRouter.use("/b2b", b2bRoutes);
 
 // 4. Admin (Protected)
 apiRouter.use("/admin", limitAdmin, adminIndexRouter);
@@ -385,6 +415,9 @@ app.use("/api/v1", apiRouter);
 
 // ✅ Mount Legacy (/api) with deprecation warning
 app.use("/api", legacyApiDeprecation, apiRouter);
+
+// Public crawlability endpoints for search engines
+app.use("/", seoStaticRoutes);
 
 /**
  * Global not-found + error handling

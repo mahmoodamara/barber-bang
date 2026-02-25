@@ -11,6 +11,8 @@ import { validate } from "../middleware/validate.js";
 import { getRequestId } from "../middleware/error.js";
 import { mapOrder } from "../utils/mapOrder.js";
 import { sendOk, sendError } from "../utils/response.js";
+import { sendB2BApprovalEmail, sendB2BRejectionEmail } from "../services/email.service.js";
+import { recalculateTotalSpent } from "../services/tierProgression.service.js";
 
 const router = express.Router();
 
@@ -63,6 +65,21 @@ function mapUser(u) {
     blockedAt: obj.blockedAt || null,
     blockedReason: obj.blockedReason || "",
     tokenVersion: obj.tokenVersion || 0,
+    // B2B / Wholesale fields
+    accountType: obj.accountType || "individual",
+    businessName: obj.businessName || "",
+    businessId: obj.businessId || "",
+    taxId: obj.taxId || "",
+    wholesaleTier: obj.wholesaleTier || "none",
+    b2bApproved: Boolean(obj.b2bApproved),
+    b2bAppliedAt: obj.b2bAppliedAt || null,
+    b2bApprovedAt: obj.b2bApprovedAt || null,
+    b2bRejectedAt: obj.b2bRejectedAt || null,
+    totalB2BSpent: obj.totalB2BSpent || 0,
+    tierLockedByAdmin: Boolean(obj.tierLockedByAdmin),
+    creditLimit: obj.creditLimit || 0,
+    creditTermDays: obj.creditTermDays || 0,
+    creditBalance: obj.creditBalance || 0,
     createdAt: obj.createdAt,
     updatedAt: obj.updatedAt,
   };
@@ -74,6 +91,8 @@ function mapUser(u) {
 
 const VALID_ROLES = ["user", "admin", "staff"];
 
+const VALID_B2B_STATUSES = ["pending", "approved", "rejected", "all"];
+
 const listQuerySchema = z.object({
   query: z
     .object({
@@ -84,6 +103,35 @@ const listQuerySchema = z.object({
       limit: z.string().regex(/^\d+$/).optional(),
     })
     .optional(),
+});
+
+const b2bListQuerySchema = z.object({
+  query: z
+    .object({
+      q: z.string().max(120).optional(),
+      status: z.enum(["pending", "approved", "rejected", "all"]).optional(),
+      page: z.string().regex(/^\d+$/).optional(),
+      limit: z.string().regex(/^\d+$/).optional(),
+    })
+    .optional(),
+});
+
+const b2bModerationSchema = z.object({
+  params: z.object({ id: z.string().min(1) }),
+  body: z
+    .object({
+      action: z.enum(["approve", "reject"]),
+      wholesaleTier: z.enum(["bronze", "silver", "gold"]).optional(),
+      note: z.string().max(400).optional(),
+      creditLimit: z.number().min(0).optional(),
+      creditTermDays: z.number().int().min(0).max(180).optional(),
+      tierLockedByAdmin: z.boolean().optional(),
+    })
+    .strict()
+    .refine(
+      (d) => !(d.action === "approve" && !d.wholesaleTier),
+      { message: "wholesaleTier is required when approving", path: ["wholesaleTier"] }
+    ),
 });
 
 const roleUpdateSchema = z.object({
@@ -170,6 +218,71 @@ router.get("/", validate(listQuerySchema), async (req, res) => {
       User.find(filter)
         .select("-passwordHash -cart -wishlist")
         .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      User.countDocuments(filter),
+    ]);
+
+    const mapped = items.map(mapUser);
+
+    return jsonRes(res, mapped, {
+      page,
+      limit,
+      total,
+      pages: Math.ceil(total / limit),
+    });
+  } catch (e) {
+    return jsonErr(res, e);
+  }
+});
+
+/* ============================
+   GET /api/admin/users/b2b
+   List B2B applicants/accounts
+   NOTE: Must be before /:id to avoid "b2b" being parsed as an ObjectId
+============================ */
+
+router.get("/b2b", validate(b2bListQuerySchema), async (req, res) => {
+  try {
+    const q = req.validated.query || {};
+
+    const page = Math.max(1, Number(q.page || 1));
+    const limit = Math.min(100, Math.max(1, Number(q.limit || 20)));
+    const skip = (page - 1) * limit;
+
+    const status = q.status || "pending";
+    let filter = {};
+
+    if (status === "pending") {
+      filter = { b2bAppliedAt: { $ne: null }, b2bApproved: { $ne: true }, b2bRejectedAt: null };
+    } else if (status === "approved") {
+      filter = { b2bApproved: true };
+    } else if (status === "rejected") {
+      filter = { b2bRejectedAt: { $ne: null }, b2bApproved: { $ne: true } };
+    } else {
+      filter = {
+        $or: [
+          { b2bAppliedAt: { $ne: null } },
+          { accountType: "business" },
+          { b2bApproved: true },
+        ],
+      };
+    }
+
+    if (q.q) {
+      const search = String(q.q).trim().slice(0, 120);
+      if (search) {
+        const regex = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+        const searchCondition = { $or: [{ name: regex }, { email: regex }, { businessName: regex }] };
+        filter = { $and: [filter, searchCondition] };
+      }
+    }
+
+    const [items, total] = await Promise.all([
+      User.find(filter)
+        .select("-passwordHash -cart -wishlist")
+        .sort({ b2bAppliedAt: -1 })
         .skip(skip)
         .limit(limit)
         .lean(),
@@ -430,6 +543,173 @@ router.patch("/:id/permissions", validate(permissionsUpdateSchema), async (req, 
       permissions: user.permissions,
       message: "Permissions updated. User will need to re-authenticate.",
     });
+  } catch (e) {
+    return jsonErr(res, e);
+  }
+});
+
+/* ============================
+   PATCH /api/admin/users/:id/b2b
+   Approve or reject a B2B application
+============================ */
+
+router.patch("/:id/b2b", validate(b2bModerationSchema), async (req, res) => {
+  try {
+    const id = String(req.params.id || "");
+    if (!isValidObjectId(id)) {
+      return safeNotFound(res, "NOT_FOUND", "User not found");
+    }
+
+    const { action, wholesaleTier, creditLimit, creditTermDays, tierLockedByAdmin } = req.validated.body;
+
+    const user = await User.findById(id).select("-passwordHash -cart -wishlist");
+    if (!user) {
+      return safeNotFound(res, "NOT_FOUND", "User not found");
+    }
+
+    if (!user.b2bAppliedAt && action === "approve") {
+      throw makeErr(400, "NO_B2B_APPLICATION", "User has not submitted a B2B application");
+    }
+
+    if (action === "approve") {
+      user.b2bApproved = true;
+      user.b2bApprovedAt = new Date();
+      user.wholesaleTier = wholesaleTier;
+      user.accountType = "business";
+      if (creditLimit != null) user.creditLimit = creditLimit;
+      if (creditTermDays != null) user.creditTermDays = creditTermDays;
+      if (tierLockedByAdmin != null) user.tierLockedByAdmin = tierLockedByAdmin;
+      user.b2bRejectedAt = null;
+    } else {
+      // reject
+      user.b2bApproved = false;
+      user.b2bApprovedAt = null;
+      user.wholesaleTier = "none";
+      user.b2bRejectedAt = new Date();
+    }
+
+    await user.save();
+
+    // Send email notification (best-effort, never blocks response)
+    const emailTo = String(user.email || "").trim().toLowerCase();
+    if (emailTo) {
+      const lang = req.query?.lang === "ar" ? "ar" : "he";
+      const bName = user.businessName || user.name || "";
+      if (action === "approve") {
+        sendB2BApprovalEmail(emailTo, { businessName: bName, wholesaleTier }, lang).catch(() => {});
+      } else {
+        sendB2BRejectionEmail(emailTo, { businessName: bName }, lang).catch(() => {});
+      }
+    }
+
+    return jsonRes(res, mapUser(user));
+  } catch (e) {
+    return jsonErr(res, e);
+  }
+});
+
+/* ============================
+   GET /api/admin/users/:id/custom-pricing
+   Retrieve a user's custom price list
+============================ */
+router.get("/:id/custom-pricing", async (req, res) => {
+  try {
+    const id = String(req.params.id || "");
+    if (!isValidObjectId(id)) {
+      return safeNotFound(res, "NOT_FOUND", "User not found");
+    }
+
+    const user = await User.findById(id)
+      .select("customPricing businessName name email wholesaleTier")
+      .populate("customPricing.productId", "titleHe titleAr sku price")
+      .lean();
+    if (!user) return safeNotFound(res, "NOT_FOUND", "User not found");
+
+    return jsonRes(res, {
+      userId: user._id,
+      businessName: user.businessName || user.name || "",
+      wholesaleTier: user.wholesaleTier || "none",
+      customPricing: (user.customPricing || []).map((cp) => ({
+        productId: cp.productId?._id || cp.productId,
+        titleHe: cp.productId?.titleHe || "",
+        titleAr: cp.productId?.titleAr || "",
+        sku: cp.productId?.sku || "",
+        retailPrice: cp.productId?.price || 0,
+        customPrice: cp.price,
+      })),
+    });
+  } catch (e) {
+    return jsonErr(res, e);
+  }
+});
+
+/* ============================
+   PUT /api/admin/users/:id/custom-pricing
+   Replace a user's entire custom price list
+============================ */
+const customPricingBodySchema = z.object({
+  body: z.object({
+    customPricing: z
+      .array(
+        z.object({
+          productId: z.string().min(1),
+          price: z.number().min(0),
+        }),
+      )
+      .max(500),
+  }),
+});
+
+router.put(
+  "/:id/custom-pricing",
+  validate(customPricingBodySchema),
+  async (req, res) => {
+    try {
+      const id = String(req.params.id || "");
+      if (!isValidObjectId(id)) {
+        return safeNotFound(res, "NOT_FOUND", "User not found");
+      }
+
+      const user = await User.findById(id).select(
+        "customPricing b2bApproved businessName name wholesaleTier",
+      );
+      if (!user) return safeNotFound(res, "NOT_FOUND", "User not found");
+      if (!user.b2bApproved) {
+        throw makeErr(
+          400,
+          "NOT_B2B",
+          "Custom pricing is only available for approved B2B users",
+        );
+      }
+
+      user.customPricing = req.validated.body.customPricing.map((cp) => ({
+        productId: cp.productId,
+        price: cp.price,
+      }));
+      await user.save();
+
+      return jsonRes(res, {
+        userId: user._id,
+        count: user.customPricing.length,
+      });
+    } catch (e) {
+      return jsonErr(res, e);
+    }
+  },
+);
+
+/* ============================
+   POST /api/admin/users/:id/recalculate-spent
+   Recalculate totalB2BSpent from order history
+============================ */
+router.post("/:id/recalculate-spent", async (req, res) => {
+  try {
+    const id = String(req.params.id || "");
+    if (!isValidObjectId(id)) {
+      return safeNotFound(res, "NOT_FOUND", "User not found");
+    }
+    const total = await recalculateTotalSpent(id);
+    return jsonRes(res, { userId: id, totalB2BSpent: total });
   } catch (e) {
     return jsonErr(res, e);
   }

@@ -37,9 +37,15 @@ function fromMinor(minor) {
 }
 
 function normalizeKey(raw) {
-  const v = String(raw || "").trim().toLowerCase();
+  const v = String(raw || "")
+    .trim()
+    .toLowerCase();
   if (!v) return "";
-  return v.replace(/\s+/g, "_").replace(/[^a-z0-9_]/g, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "");
+  return v
+    .replace(/\s+/g, "_")
+    .replace(/[^a-z0-9_]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "");
 }
 
 function normalizeAttributesList(variant) {
@@ -69,9 +75,12 @@ function legacyAttributesObject(list) {
   for (const a of list || []) {
     const key = String(a?.key || "");
     const val = a?.value;
-    if (key === "volume_ml" && Number.isFinite(Number(val))) obj.volumeMl = Number(val);
-    if (key === "weight_g" && Number.isFinite(Number(val))) obj.weightG = Number(val);
-    if (key === "pack_count" && Number.isFinite(Number(val))) obj.packCount = Number(val);
+    if (key === "volume_ml" && Number.isFinite(Number(val)))
+      obj.volumeMl = Number(val);
+    if (key === "weight_g" && Number.isFinite(Number(val)))
+      obj.weightG = Number(val);
+    if (key === "pack_count" && Number.isFinite(Number(val)))
+      obj.packCount = Number(val);
     if (key === "scent" && typeof val === "string") obj.scent = val;
     if (key === "hold_level" && typeof val === "string") obj.holdLevel = val;
     if (key === "finish_type" && typeof val === "string") obj.finishType = val;
@@ -92,7 +101,9 @@ async function getPopulatedGuestCart(items, { lang = "he" } = {}) {
     if (!p || !p._id || p.isActive === false || p.isDeleted === true) continue;
     const hasVariants = Array.isArray(p.variants) && p.variants.length > 0;
     const variantIdStr = String(ci.variantId || "");
-    const variant = hasVariants ? p.variants.find((v) => String(v?._id) === variantIdStr) : null;
+    const variant = hasVariants
+      ? p.variants.find((v) => String(v?._id) === variantIdStr)
+      : null;
     if (hasVariants && variantIdStr && !variant) continue;
     const currentUnitMinor = computeEffectiveUnitPriceMinor(p, variant, now);
     const currentStock = hasVariants ? (variant?.stock ?? 0) : (p.stock ?? 0);
@@ -125,10 +136,14 @@ router.get("/", async (req, res) => {
     if (!result) {
       return res.json({ ok: true, data: [], cartId: null });
     }
-    const populated = await getPopulatedGuestCart(result.cart.items, { lang: req.lang });
+    const populated = await getPopulatedGuestCart(result.cart.items, {
+      lang: req.lang,
+    });
     return res.json({ ok: true, data: populated, cartId: result.cartId });
   } catch (e) {
-    return res.status(500).json(errorPayload(req, "INTERNAL", "Failed to fetch guest cart"));
+    return res
+      .status(500)
+      .json(errorPayload(req, "INTERNAL", "Failed to fetch guest cart"));
   }
 });
 
@@ -146,43 +161,70 @@ router.post("/add", validate(guestAddSchema), async (req, res) => {
   try {
     const cartId =
       getGuestCartIdFromRequest(req) || req.validated?.body?.guestCartId;
-    const result = await getOrCreateGuestCart(cartId, { createIfMissing: true });
+    const result = await getOrCreateGuestCart(cartId, {
+      createIfMissing: true,
+    });
     if (!result) {
-      return res.status(400).json(errorPayload(req, "CART_ID_REQUIRED", "guestCartId or cookie required"));
+      return res
+        .status(400)
+        .json(
+          errorPayload(
+            req,
+            "CART_ID_REQUIRED",
+            "guestCartId or cookie required",
+          ),
+        );
     }
 
     const { productId, qty, variantId } = req.validated.body;
     const product = await Product.findById(productId);
     if (!product || product.isActive === false || product.isDeleted === true) {
-      return res.status(404).json(errorPayload(req, "NOT_FOUND", "Product not found"));
+      return res
+        .status(404)
+        .json(errorPayload(req, "NOT_FOUND", "Product not found"));
     }
 
-    const hasVariants = Array.isArray(product.variants) && product.variants.length > 0;
+    const hasVariants =
+      Array.isArray(product.variants) && product.variants.length > 0;
     if (hasVariants && !variantId) {
-      return res.status(400).json(
-        errorPayload(req, "VARIANT_REQUIRED", "variantId is required for this product", { productId })
-      );
+      return res
+        .status(400)
+        .json(
+          errorPayload(
+            req,
+            "VARIANT_REQUIRED",
+            "variantId is required for this product",
+            { productId },
+          ),
+        );
     }
 
     const variant = hasVariants
       ? product.variants.find((v) => String(v?._id) === String(variantId))
       : null;
     if (hasVariants && !variant) {
-      return res.status(400).json(
-        errorPayload(req, "INVALID_VARIANT", "Invalid variantId", { productId, variantId })
-      );
+      return res
+        .status(400)
+        .json(
+          errorPayload(req, "INVALID_VARIANT", "Invalid variantId", {
+            productId,
+            variantId,
+          }),
+        );
     }
 
     const idMatch = String(variant?._id || "");
     const doc = await GuestCart.findOne({ cartId: result.cartId });
     if (!doc) {
-      return res.status(404).json(errorPayload(req, "CART_NOT_FOUND", "Guest cart not found"));
+      return res
+        .status(404)
+        .json(errorPayload(req, "CART_NOT_FOUND", "Guest cart not found"));
     }
 
     const idx = doc.items.findIndex(
       (x) =>
         String(x.productId) === productId &&
-        String(x.variantId || "") === idMatch
+        String(x.variantId || "") === idMatch,
     );
 
     const now = new Date();
@@ -211,12 +253,15 @@ router.post("/add", validate(guestAddSchema), async (req, res) => {
     doc.updatedAt = new Date();
     await doc.save();
 
-    const populated = await getPopulatedGuestCart(doc.items, { lang: req.lang });
-    const json = res.json({ ok: true, data: populated, cartId: result.cartId });
+    const populated = await getPopulatedGuestCart(doc.items, {
+      lang: req.lang,
+    });
     setCartIdCookie(res, result.cartId);
-    return json;
+    return res.json({ ok: true, data: populated, cartId: result.cartId });
   } catch (e) {
-    return res.status(500).json(errorPayload(req, "INTERNAL", "Failed to add to guest cart"));
+    return res
+      .status(500)
+      .json(errorPayload(req, "INTERNAL", "Failed to add to guest cart"));
   }
 });
 
@@ -234,43 +279,70 @@ router.post("/set-qty", validate(guestSetQtySchema), async (req, res) => {
     const cartId = getGuestCartIdFromRequest(req);
     const result = await getOrCreateGuestCart(cartId);
     if (!result) {
-      return res.status(400).json(errorPayload(req, "CART_ID_REQUIRED", "guestCartId or cookie required"));
+      return res
+        .status(400)
+        .json(
+          errorPayload(
+            req,
+            "CART_ID_REQUIRED",
+            "guestCartId or cookie required",
+          ),
+        );
     }
 
     const { productId, qty, variantId } = req.validated.body;
     const product = await Product.findById(productId);
     if (!product || product.isActive === false || product.isDeleted === true) {
-      return res.status(404).json(errorPayload(req, "NOT_FOUND", "Product not found"));
+      return res
+        .status(404)
+        .json(errorPayload(req, "NOT_FOUND", "Product not found"));
     }
 
-    const hasVariants = Array.isArray(product.variants) && product.variants.length > 0;
+    const hasVariants =
+      Array.isArray(product.variants) && product.variants.length > 0;
     const targetVariantId = hasVariants ? String(variantId || "") : "";
     if (hasVariants && !variantId) {
-      return res.status(400).json(
-        errorPayload(req, "VARIANT_REQUIRED", "variantId is required for this product", { productId })
-      );
+      return res
+        .status(400)
+        .json(
+          errorPayload(
+            req,
+            "VARIANT_REQUIRED",
+            "variantId is required for this product",
+            { productId },
+          ),
+        );
     }
 
     const doc = await GuestCart.findOne({ cartId: result.cartId });
-    if (!doc) return res.status(404).json(errorPayload(req, "CART_NOT_FOUND", "Guest cart not found"));
+    if (!doc)
+      return res
+        .status(404)
+        .json(errorPayload(req, "CART_NOT_FOUND", "Guest cart not found"));
 
     const idx = doc.items.findIndex(
       (x) =>
         String(x.productId) === productId &&
-        (!hasVariants || String(x.variantId || "") === targetVariantId)
+        (!hasVariants || String(x.variantId || "") === targetVariantId),
     );
     if (idx < 0) {
-      return res.status(404).json(errorPayload(req, "NOT_FOUND", "Item not found in cart"));
+      return res
+        .status(404)
+        .json(errorPayload(req, "NOT_FOUND", "Item not found in cart"));
     }
 
     doc.items[idx].qty = qty;
     doc.updatedAt = new Date();
     await doc.save();
 
-    const populated = await getPopulatedGuestCart(doc.items, { lang: req.lang });
+    const populated = await getPopulatedGuestCart(doc.items, {
+      lang: req.lang,
+    });
     return res.json({ ok: true, data: populated, cartId: result.cartId });
   } catch (e) {
-    return res.status(500).json(errorPayload(req, "INTERNAL", "Failed to update guest cart"));
+    return res
+      .status(500)
+      .json(errorPayload(req, "INTERNAL", "Failed to update guest cart"));
   }
 });
 
@@ -294,13 +366,22 @@ router.post("/remove", validate(guestRemoveSchema), async (req, res) => {
     const doc = await GuestCart.findOne({ cartId: result.cartId });
     if (!doc) return res.json({ ok: true, data: [], cartId: result.cartId });
 
-    const matchingLines = doc.items.filter((x) => String(x.productId) === productId);
-    const hasVariantLines = matchingLines.some((x) => String(x.variantId || "").trim() !== "");
+    const matchingLines = doc.items.filter(
+      (x) => String(x.productId) === productId,
+    );
+    const hasVariantLines = matchingLines.some(
+      (x) => String(x.variantId || "").trim() !== "",
+    );
     if (hasVariantLines && !variantId) {
       return res.status(400).json(
-        errorPayload(req, "VARIANT_REQUIRED", "variantId is required when removing variant products", {
-          productId,
-        })
+        errorPayload(
+          req,
+          "VARIANT_REQUIRED",
+          "variantId is required when removing variant products",
+          {
+            productId,
+          },
+        ),
       );
     }
 
@@ -308,7 +389,7 @@ router.post("/remove", validate(guestRemoveSchema), async (req, res) => {
       doc.items = doc.items.filter(
         (x) =>
           String(x.productId) !== productId ||
-          String(x.variantId || "") !== String(variantId)
+          String(x.variantId || "") !== String(variantId),
       );
     } else {
       doc.items = doc.items.filter((x) => String(x.productId) !== productId);
@@ -316,10 +397,14 @@ router.post("/remove", validate(guestRemoveSchema), async (req, res) => {
     doc.updatedAt = new Date();
     await doc.save();
 
-    const populated = await getPopulatedGuestCart(doc.items, { lang: req.lang });
+    const populated = await getPopulatedGuestCart(doc.items, {
+      lang: req.lang,
+    });
     return res.json({ ok: true, data: populated, cartId: result.cartId });
   } catch (e) {
-    return res.status(500).json(errorPayload(req, "INTERNAL", "Failed to remove from guest cart"));
+    return res
+      .status(500)
+      .json(errorPayload(req, "INTERNAL", "Failed to remove from guest cart"));
   }
 });
 
@@ -332,11 +417,13 @@ router.post("/clear", async (req, res) => {
 
     await GuestCart.updateOne(
       { cartId: result.cartId },
-      { $set: { items: [], updatedAt: new Date() } }
+      { $set: { items: [], updatedAt: new Date() } },
     );
     return res.json({ ok: true, data: [], cartId: result.cartId });
   } catch (e) {
-    return res.status(500).json(errorPayload(req, "INTERNAL", "Failed to clear guest cart"));
+    return res
+      .status(500)
+      .json(errorPayload(req, "INTERNAL", "Failed to clear guest cart"));
   }
 });
 

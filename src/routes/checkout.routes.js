@@ -2,9 +2,11 @@
 
 import express from "express";
 import mongoose from "mongoose";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
+import bcrypt from "bcryptjs";
 
-import { requireAuth } from "../middleware/auth.js";
+import { optionalAuth, requireAuth } from "../middleware/auth.js";
 import { validate } from "../middleware/validate.js";
 
 import { User } from "../models/User.js";
@@ -12,6 +14,7 @@ import { Order } from "../models/Order.js";
 import { Counter } from "../models/Counter.js";
 import { DeliveryArea } from "../models/DeliveryArea.js";
 import { PickupPoint } from "../models/PickupPoint.js";
+import { GuestCart } from "../models/GuestCart.js";
 
 import {
   quotePricing,
@@ -19,19 +22,28 @@ import {
   reserveCouponAtomic,
   releaseCouponReservation,
 } from "../services/pricing.service.js";
-import { createCheckoutSession, retrieveCheckoutSession } from "../services/stripe.service.js";
+import {
+  createCheckoutSession,
+  retrieveCheckoutSession,
+} from "../services/stripe.service.js";
 import { withMongoTransaction } from "../utils/withMongoTransaction.js";
 import { toMinorUnits } from "../utils/stripe.js";
+import { evaluateTierProgression } from "../services/tierProgression.service.js";
 import {
   reserveStockForOrder,
   confirmStockReservation,
   releaseStockReservation,
   releaseExpiredReservations,
 } from "../services/products.service.js";
+import { sendOrderConfirmationSafe } from "../services/email.service.js";
 import { getRequestId } from "../middleware/error.js";
 import { getCheckoutFailureCounter } from "../middleware/prometheus.js";
 import { onCheckoutFailure } from "../utils/alertHooks.js";
 import { setPrivateNoStore } from "../utils/response.js";
+import {
+  getGuestCartIdFromRequest,
+  getOrCreateGuestCart,
+} from "../services/guestCart.service.js";
 
 const router = express.Router();
 
@@ -59,6 +71,12 @@ const addressSchema = z.object({
   notes: z.string().max(300).optional(),
 });
 
+const guestContactSchema = z.object({
+  fullName: z.string().min(2).max(80),
+  phone: z.string().min(7).max(30),
+  email: z.string().email().max(160),
+});
+
 const baseCheckoutBodySchema = z
   .object({
     shippingMode: z.enum(["DELIVERY", "PICKUP_POINT", "STORE_PICKUP"]),
@@ -66,6 +84,8 @@ const baseCheckoutBodySchema = z
     pickupPointId: z.string().min(1).optional(),
     address: addressSchema.optional(),
     couponCode: z.string().max(40).optional(),
+    guestContact: guestContactSchema.optional(),
+    poNumber: z.string().max(100).optional(),
   })
   .superRefine((b, ctx) => {
     if (b.shippingMode === "DELIVERY") {
@@ -176,7 +196,7 @@ async function getNextOrderNumber(session = null) {
       upsert: true,
       setDefaultsOnInsert: true,
       ...(session ? { session } : {}),
-    }
+    },
   );
 
   const seq = Number(counter?.seq || 0);
@@ -202,13 +222,17 @@ async function cleanupCartInvalidItems(userId) {
     if (!p || !p._id || p.isActive === false || p.isDeleted === true) continue;
     const hasVariants = Array.isArray(p.variants) && p.variants.length > 0;
     const variantIdStr = String(ci.variantId || "");
-    const variant = hasVariants ? p.variants.find((v) => String(v?._id || "") === variantIdStr) : null;
+    const variant = hasVariants
+      ? p.variants.find((v) => String(v?._id || "") === variantIdStr)
+      : null;
     if (hasVariants && variantIdStr && !variant) continue;
     keep.push(ci);
   }
 
   if (keep.length !== (user.cart || []).length) {
-    await User.updateOne({ _id: userId }, { $set: { cart: keep } }).catch(() => {});
+    await User.updateOne({ _id: userId }, { $set: { cart: keep } }).catch(
+      () => {},
+    );
   }
 }
 
@@ -229,6 +253,24 @@ async function getCartItemsOrThrow(userId) {
 
   if (!items.length) throw makeErr(400, "CART_EMPTY", "Cart is empty");
   return items;
+}
+
+async function getGuestCartItemsOrThrow(req) {
+  const cartId = getGuestCartIdFromRequest(req);
+  const result = await getOrCreateGuestCart(cartId);
+  if (!result?.cart?.items?.length)
+    throw makeErr(400, "CART_EMPTY", "Cart is empty");
+
+  const items = (result.cart.items || [])
+    .map((x) => ({
+      productId: x.productId?.toString?.() || String(x.productId || ""),
+      qty: Math.max(1, Math.min(999, Number(x.qty || 1))),
+      variantId: String(x.variantId || ""),
+    }))
+    .filter((x) => x.productId);
+
+  if (!items.length) throw makeErr(400, "CART_EMPTY", "Cart is empty");
+  return { items, guestCartId: String(result.cartId || "") };
 }
 
 /**
@@ -260,7 +302,7 @@ async function clearPurchasedItemsFromCart(userId, orderItems, session = null) {
 
     // Keep item if it's NOT in the purchased list
     return !purchasedItems.some(
-      (p) => p.productId === cartProductId && p.variantId === cartVariantId
+      (p) => p.productId === cartProductId && p.variantId === cartVariantId,
     );
   });
 
@@ -269,8 +311,81 @@ async function clearPurchasedItemsFromCart(userId, orderItems, session = null) {
     await User.updateOne(
       { _id: userId },
       { $set: { cart: newCart } },
-      session ? { session } : {}
+      session ? { session } : {},
     );
+  }
+}
+
+async function clearPurchasedItemsFromGuestCart(
+  guestCartId,
+  orderItems,
+  session = null,
+) {
+  if (!guestCartId || !orderItems?.length) return;
+  const cart = await GuestCart.findOne({ cartId: guestCartId }).select("items");
+  if (!cart || !cart.items?.length) return;
+
+  const purchasedItems = (orderItems || [])
+    .filter((x) => x?.productId)
+    .map((x) => ({
+      productId: String(x.productId),
+      variantId: String(x.variantId || ""),
+    }));
+  if (!purchasedItems.length) return;
+
+  cart.items = cart.items.filter((cartItem) => {
+    const cartProductId = String(cartItem.productId);
+    const cartVariantId = String(cartItem.variantId || "");
+    return !purchasedItems.some(
+      (p) => p.productId === cartProductId && p.variantId === cartVariantId,
+    );
+  });
+
+  await cart.save(session ? { session } : undefined);
+}
+
+function normalizeGuestContact(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const fullName = String(raw.fullName || "").trim();
+  const phone = String(raw.phone || "").trim();
+  const email = String(raw.email || "")
+    .trim()
+    .toLowerCase();
+  if (!fullName || !phone || !email) return null;
+  return { fullName, phone, email };
+}
+
+async function getOrCreateCheckoutUserFromGuestContact(guestContact) {
+  const normalized = normalizeGuestContact(guestContact);
+  if (!normalized) {
+    throw makeErr(
+      400,
+      "GUEST_CONTACT_REQUIRED",
+      "Guest contact details are required",
+    );
+  }
+
+  const existing = await User.findOne({ email: normalized.email }).select(
+    "_id name email role tokenVersion isBlocked permissions",
+  );
+  if (existing) return existing;
+
+  const passwordHash = await bcrypt.hash(randomUUID(), 10);
+  try {
+    const created = await User.create({
+      name: normalized.fullName,
+      email: normalized.email,
+      passwordHash,
+    });
+    return created;
+  } catch (e) {
+    if (e?.code === 11000) {
+      const raceWinner = await User.findOne({ email: normalized.email }).select(
+        "_id name email role tokenVersion isBlocked permissions",
+      );
+      if (raceWinner) return raceWinner;
+    }
+    throw e;
   }
 }
 
@@ -283,10 +398,11 @@ async function clearPurchasedItemsFromCart(userId, orderItems, session = null) {
  */
 function toShippingInput(body) {
   const a = body.address || null;
+  const g = normalizeGuestContact(body.guestContact);
 
   const safeAddress = {
-    fullName: String(a?.fullName || ""),
-    phone: String(a?.phone || ""),
+    fullName: String(a?.fullName || g?.fullName || ""),
+    phone: String(a?.phone || g?.phone || ""),
     city: String(a?.city || ""),
     street: String(a?.street || ""),
     // Extended address fields (safe storage) - Issue #3 fix
@@ -343,7 +459,8 @@ async function attachShippingSnapshots(shipping) {
       throw makeErr(400, "INVALID_PICKUP_POINT", "Pickup point not found");
     }
     base.pickupPointName = point.nameHe || point.name || point.nameAr || "";
-    base.pickupPointAddress = point.addressHe || point.address || point.addressAr || "";
+    base.pickupPointAddress =
+      point.addressHe || point.address || point.addressAr || "";
     return base;
   }
 
@@ -450,7 +567,7 @@ function buildStripeQuote(quote) {
 ============================ */
 
 async function findExistingCheckoutOrder({ userId, idemKey, paymentMethod }) {
-  if (!idemKey) return null;
+  if (!idemKey || !userId) return null;
 
   const existing = await Order.findOne({
     userId,
@@ -469,23 +586,31 @@ async function findExistingCheckoutOrder({ userId, idemKey, paymentMethod }) {
  * POST /api/checkout/quote
  * ✅ Single truth pricing for UI
  */
-router.post("/quote", requireAuth(), validate(quoteSchema), async (req, res) => {
-  try {
-    const cartItems = await getCartItemsOrThrow(req.user._id);
-    const b = req.validated.body;
+router.post(
+  "/quote",
+  optionalAuth(),
+  validate(quoteSchema),
+  async (req, res) => {
+    try {
+      const b = req.validated.body;
+      const authUserId = req.user?._id || null;
+      const cartItems = authUserId
+        ? await getCartItemsOrThrow(authUserId)
+        : (await getGuestCartItemsOrThrow(req)).items;
 
-    const quote = await quotePricing({
-      cartItems,
-      shipping: toShippingInput(b),
-      couponCode: b.couponCode,
-      userId: req.user?._id ?? null,
-    });
+      const quote = await quotePricing({
+        cartItems,
+        shipping: toShippingInput(b),
+        couponCode: b.couponCode,
+        userId: authUserId,
+      });
 
-    return res.json({ ok: true, data: quote });
-  } catch (e) {
-    return jsonErr(res, e);
-  }
-});
+      return res.json({ ok: true, data: quote });
+    } catch (e) {
+      return jsonErr(res, e);
+    }
+  },
+);
 
 /**
  * POST /api/checkout/cod
@@ -495,25 +620,41 @@ router.post("/quote", requireAuth(), validate(quoteSchema), async (req, res) => 
  * ✅ Clear cart NOW
  * ✅ Idempotency supported (returns existing order if retry)
  */
-router.post("/cod", requireAuth(), validate(quoteSchema), async (req, res) => {
+router.post("/cod", optionalAuth(), validate(quoteSchema), async (req, res) => {
   let reserved = false;
   let orderId = null;
   let orderCreated = false;
   let fallbackUsed = false;
+  let guestCartId = "";
 
   try {
+    const b = req.validated.body;
+    const authUserId = req.user?._id || null;
+    const checkoutUser = authUserId
+      ? req.user
+      : await getOrCreateCheckoutUserFromGuestContact(b.guestContact);
+    const checkoutUserId = checkoutUser?._id;
+    if (!checkoutUserId)
+      throw makeErr(401, "UNAUTHORIZED", "Unable to identify checkout user");
+
     const idemKey = pickIdempotencyKey(req);
 
     // idempotency: if exists, return it
     const existing = await findExistingCheckoutOrder({
-      userId: req.user._id,
+      userId: checkoutUserId,
       idemKey,
       paymentMethod: "cod",
     });
     if (existing) return res.status(200).json({ ok: true, data: existing });
 
-    const cartItems = await getCartItemsOrThrow(req.user._id);
-    const b = req.validated.body;
+    let cartItems = [];
+    if (authUserId) {
+      cartItems = await getCartItemsOrThrow(authUserId);
+    } else {
+      const guestCart = await getGuestCartItemsOrThrow(req);
+      cartItems = guestCart.items;
+      guestCartId = guestCart.guestCartId;
+    }
 
     const shipping = await attachShippingSnapshots(toShippingInput(b));
 
@@ -521,12 +662,12 @@ router.post("/cod", requireAuth(), validate(quoteSchema), async (req, res) => {
       cartItems,
       shipping,
       couponCode: b.couponCode,
-      userId: req.user?._id ?? null,
+      userId: checkoutUserId,
     });
 
     // ✅ Check for gift stock warnings - if any gifts are out of stock, reject early
     const criticalGiftWarnings = (quote.meta?.giftWarnings || []).filter(
-      (w) => w.type === "GIFT_OUT_OF_STOCK"
+      (w) => w.type === "GIFT_OUT_OF_STOCK",
     );
     if (criticalGiftWarnings.length > 0) {
       return res.status(400).json({
@@ -542,7 +683,10 @@ router.post("/cod", requireAuth(), validate(quoteSchema), async (req, res) => {
     }
 
     await releaseExpiredReservations().catch((e) => {
-      req.log.warn({ err: String(e?.message || e) }, "[best-effort] checkout release expired reservations failed");
+      req.log.warn(
+        { err: String(e?.message || e) },
+        "[best-effort] checkout release expired reservations failed",
+      );
     });
 
     const discountTotal = calcDiscountTotal(quote);
@@ -566,7 +710,7 @@ router.post("/cod", requireAuth(), validate(quoteSchema), async (req, res) => {
       // ✅ Reserve stock for BOTH items and gifts
       await reserveStockForOrder({
         orderId,
-        userId: req.user._id,
+        userId: checkoutUserId,
         items: reservationItems,
         ttlMinutes: 15,
         session,
@@ -577,7 +721,7 @@ router.post("/cod", requireAuth(), validate(quoteSchema), async (req, res) => {
         [
           {
             _id: orderId,
-            userId: req.user._id,
+            userId: checkoutUserId,
             orderNumber,
 
             items: orderItems,
@@ -628,27 +772,34 @@ router.post("/cod", requireAuth(), validate(quoteSchema), async (req, res) => {
 
             stripe: { sessionId: "", paymentIntentId: "" },
 
+            poNumber: b.poNumber || "",
+            isB2B: Boolean(checkoutUser?.b2bApproved),
+
             idempotency: {
               checkoutKey: idemKey || "",
             },
 
             couponReservation: couponAppliedCode
               ? {
-                code: couponAppliedCode,
-                status: "consumed",
-                reservedAt: new Date(),
-                expiresAt: null,
-              }
+                  code: couponAppliedCode,
+                  status: "consumed",
+                  reservedAt: new Date(),
+                  expiresAt: null,
+                }
               : undefined,
           },
         ],
-        session ? { session } : {}
+        session ? { session } : {},
       );
       orderCreated = true;
 
       const confirmed = await confirmStockReservation({ orderId, session });
       if (!confirmed) {
-        throw makeErr(409, "RESERVATION_INVALID", "Stock reservation expired or invalid");
+        throw makeErr(
+          409,
+          "RESERVATION_INVALID",
+          "Stock reservation expired or invalid",
+        );
       }
 
       // ✅ Atomic coupon consumption with idempotency (COD only)
@@ -656,37 +807,268 @@ router.post("/cod", requireAuth(), validate(quoteSchema), async (req, res) => {
         const couponResult = await consumeCouponAtomic({
           code: couponAppliedCode,
           orderId,
-          userId: req.user._id,
+          userId: checkoutUserId,
           discountAmount: Number(quote?.discounts?.coupon?.amount || 0),
           session,
         });
         if (!couponResult.success && !couponResult.alreadyUsed) {
-          throw makeErr(400, couponResult.error || "COUPON_CONSUMPTION_FAILED", "Coupon could not be applied");
+          throw makeErr(
+            400,
+            couponResult.error || "COUPON_CONSUMPTION_FAILED",
+            "Coupon could not be applied",
+          );
         }
       }
 
       // clear only purchased items from cart after COD order placement
       // (keeps items added after checkout started)
-      await clearPurchasedItemsFromCart(req.user._id, orderItems, session);
+      if (authUserId) {
+        await clearPurchasedItemsFromCart(authUserId, orderItems, session);
+      } else {
+        await clearPurchasedItemsFromGuestCart(
+          guestCartId,
+          orderItems,
+          session,
+        );
+      }
 
       return created?.[0] || created;
     });
+
+    // Best-effort confirmation email — fire-and-forget, does not block response
+    sendOrderConfirmationSafe(order._id).catch((e) => {
+      req.log.warn(
+        { err: String(e?.message || e), orderId: order._id },
+        "[checkout.cod] confirmation email best-effort failed",
+      );
+    });
+
+    // B2B tier progression evaluation (best-effort)
+    if (order.isB2B && authUserId) {
+      evaluateTierProgression(authUserId, Number(order.pricing?.total || 0)).catch(() => {});
+    }
 
     return res.status(201).json({ ok: true, data: order });
   } catch (e) {
     // Best-effort cleanup in fallback mode (no transaction)
     if (fallbackUsed && reserved && orderId) {
       await releaseStockReservation({ orderId }).catch((cleanupErr) => {
-        req.log.warn({ err: String(cleanupErr?.message || cleanupErr) }, "[best-effort] checkout release stock reservation failed");
+        req.log.warn(
+          { err: String(cleanupErr?.message || cleanupErr) },
+          "[best-effort] checkout release stock reservation failed",
+        );
       });
     }
     if (fallbackUsed && orderCreated && orderId) {
       await Order.deleteOne({ _id: orderId }).catch((cleanupErr) => {
-        req.log.warn({ err: String(cleanupErr?.message || cleanupErr) }, "[best-effort] checkout cleanup delete order failed");
+        req.log.warn(
+          { err: String(cleanupErr?.message || cleanupErr) },
+          "[best-effort] checkout cleanup delete order failed",
+        );
       });
     }
 
     // Return the original structured error instead of masking with generic 500
+    return jsonErr(res, e);
+  }
+});
+
+/**
+ * POST /api/checkout/bank-transfer
+ * B2B only — creates order with pending_payment status, awaiting bank transfer confirmation.
+ */
+router.post("/bank-transfer", requireAuth(), validate(quoteSchema), async (req, res) => {
+  try {
+    const b = req.validated?.body ?? req.body;
+    const userId = req.user._id;
+
+    const user = await User.findById(userId).select("b2bApproved wholesaleTier taxId businessName").lean();
+    if (!user?.b2bApproved) {
+      return jsonErr(res, makeErr(403, "NOT_B2B", "Bank transfer is only available for B2B accounts"));
+    }
+
+    const cartItems = await getCartItemsOrThrow(userId);
+
+    const shipping = await attachShippingSnapshots(toShippingInput(b));
+
+    const quote = await quotePricing({
+      cartItems,
+      shipping,
+      couponCode: b.couponCode || null,
+      userId,
+    });
+
+    const orderItems = mapOrderItemsFromQuote(quote);
+    const giftItems = mapGiftItemsFromQuote(quote);
+    const discountTotal = calcDiscountTotal(quote);
+    const couponAppliedCode = String(quote?.discounts?.coupon?.code || "");
+
+    const orderId = new mongoose.Types.ObjectId();
+    const orderNumber = await getNextOrderNumber(null);
+
+    const created = await Order.create([
+      {
+        _id: orderId,
+        userId,
+        orderNumber,
+        items: orderItems,
+        gifts: giftItems,
+        status: "pending_payment",
+        paymentMethod: "bank_transfer",
+        poNumber: b.poNumber || "",
+        isB2B: true,
+        pricing: {
+          subtotal: Number(quote.subtotal || 0),
+          shippingFee: Number(quote.shippingFee || 0),
+          discounts: quote.discounts || { coupon: { code: null, amount: 0 }, campaign: { amount: 0 }, offer: { amount: 0 } },
+          total: Number(quote.total || 0),
+          vatRate: Number(quote.vatRate || 0),
+          vatIncludedInPrices: Boolean(quote.vatIncludedInPrices || false),
+          vatAmount: Number(quote.vatAmount || 0),
+          totalBeforeVat: Number(quote.totalBeforeVat || 0),
+          totalAfterVat: Number(quote.totalAfterVat || 0),
+          discountTotal: Number(discountTotal || 0),
+          couponCode: couponAppliedCode,
+          subtotalMinor: Number(quote.subtotalMinor || 0),
+          shippingFeeMinor: Number(quote.shippingFeeMinor || 0),
+          discountTotalMinor: Number(toMinorUnits(discountTotal || 0)),
+          totalMinor: Number(quote.totalMinor || 0),
+          vatAmountMinor: Number(quote.vatAmountMinor || 0),
+          totalBeforeVatMinor: Number(quote.totalBeforeVatMinor || 0),
+          totalAfterVatMinor: Number(quote.totalAfterVatMinor || 0),
+        },
+        pricingMinor: {
+          subtotal: toMinorUnits(quote.subtotal || 0),
+          shippingFee: toMinorUnits(quote.shippingFee || 0),
+          vatAmount: toMinorUnits(quote.vatAmount || 0),
+          totalBeforeVat: toMinorUnits(quote.totalBeforeVat || 0),
+          totalAfterVat: toMinorUnits(quote.totalAfterVat || 0),
+          total: toMinorUnits(quote.total || 0),
+        },
+        shipping,
+        invoice: {
+          customerVatId: String(user.taxId || ""),
+          customerCompanyName: String(user.businessName || ""),
+        },
+      },
+    ]);
+
+    const order = created?.[0] || created;
+
+    await clearPurchasedItemsFromCart(userId, orderItems, null);
+    sendOrderConfirmationSafe(order._id).catch(() => {});
+
+    // B2B tier progression evaluation (best-effort)
+    evaluateTierProgression(userId, Number(quote.total || 0)).catch(() => {});
+
+    return res.status(201).json({ ok: true, data: order });
+  } catch (e) {
+    return jsonErr(res, e);
+  }
+});
+
+/**
+ * POST /api/checkout/net-terms
+ * B2B only — creates order on credit (Net 30/60/etc). Requires credit limit.
+ */
+router.post("/net-terms", requireAuth(), validate(quoteSchema), async (req, res) => {
+  try {
+    const b = req.validated?.body ?? req.body;
+    const userId = req.user._id;
+
+    const user = await User.findById(userId).select("b2bApproved wholesaleTier taxId businessName creditLimit creditTermDays creditBalance").lean();
+    if (!user?.b2bApproved) {
+      return jsonErr(res, makeErr(403, "NOT_B2B", "B2B account required for net terms"));
+    }
+    if (!user.creditLimit || user.creditLimit <= 0) {
+      return jsonErr(res, makeErr(400, "NO_CREDIT", "No credit limit configured. Contact admin."));
+    }
+
+    const cartItems = await getCartItemsOrThrow(userId);
+    const shipping = await attachShippingSnapshots(toShippingInput(b));
+
+    const quote = await quotePricing({
+      cartItems,
+      shipping,
+      couponCode: b.couponCode || null,
+      userId,
+    });
+
+    const orderTotal = Number(quote.total || 0);
+    const newBalance = (user.creditBalance || 0) + orderTotal;
+    if (newBalance > user.creditLimit) {
+      return jsonErr(res, makeErr(400, "CREDIT_EXCEEDED", `Order exceeds credit limit. Available: ₪${(user.creditLimit - (user.creditBalance || 0)).toFixed(2)}`));
+    }
+
+    const orderItems = mapOrderItemsFromQuote(quote);
+    const giftItems = mapGiftItemsFromQuote(quote);
+    const discountTotal = calcDiscountTotal(quote);
+    const couponAppliedCode = String(quote?.discounts?.coupon?.code || "");
+    const termDays = user.creditTermDays || 30;
+
+    const orderId = new mongoose.Types.ObjectId();
+    const orderNumber = await getNextOrderNumber(null);
+
+    const created = await Order.create([
+      {
+        _id: orderId,
+        userId,
+        orderNumber,
+        items: orderItems,
+        gifts: giftItems,
+        status: "confirmed",
+        paymentMethod: "net_terms",
+        paymentDueAt: new Date(Date.now() + termDays * 24 * 60 * 60 * 1000),
+        poNumber: b.poNumber || "",
+        isB2B: true,
+        pricing: {
+          subtotal: Number(quote.subtotal || 0),
+          shippingFee: Number(quote.shippingFee || 0),
+          discounts: quote.discounts || { coupon: { code: null, amount: 0 }, campaign: { amount: 0 }, offer: { amount: 0 } },
+          total: orderTotal,
+          vatRate: Number(quote.vatRate || 0),
+          vatIncludedInPrices: Boolean(quote.vatIncludedInPrices || false),
+          vatAmount: Number(quote.vatAmount || 0),
+          totalBeforeVat: Number(quote.totalBeforeVat || 0),
+          totalAfterVat: Number(quote.totalAfterVat || 0),
+          discountTotal: Number(discountTotal || 0),
+          couponCode: couponAppliedCode,
+          subtotalMinor: Number(quote.subtotalMinor || 0),
+          shippingFeeMinor: Number(quote.shippingFeeMinor || 0),
+          discountTotalMinor: Number(toMinorUnits(discountTotal || 0)),
+          totalMinor: Number(quote.totalMinor || 0),
+          vatAmountMinor: Number(quote.vatAmountMinor || 0),
+          totalBeforeVatMinor: Number(quote.totalBeforeVatMinor || 0),
+          totalAfterVatMinor: Number(quote.totalAfterVatMinor || 0),
+        },
+        pricingMinor: {
+          subtotal: toMinorUnits(quote.subtotal || 0),
+          shippingFee: toMinorUnits(quote.shippingFee || 0),
+          vatAmount: toMinorUnits(quote.vatAmount || 0),
+          totalBeforeVat: toMinorUnits(quote.totalBeforeVat || 0),
+          totalAfterVat: toMinorUnits(quote.totalAfterVat || 0),
+          total: toMinorUnits(quote.total || 0),
+        },
+        shipping,
+        invoice: {
+          customerVatId: String(user.taxId || ""),
+          customerCompanyName: String(user.businessName || ""),
+        },
+      },
+    ]);
+
+    // Update credit balance
+    await User.updateOne({ _id: userId }, { $inc: { creditBalance: orderTotal } });
+
+    const order = created?.[0] || created;
+    await clearPurchasedItemsFromCart(userId, orderItems, null);
+    sendOrderConfirmationSafe(order._id).catch(() => {});
+
+    // B2B tier progression evaluation (best-effort)
+    evaluateTierProgression(userId, orderTotal).catch(() => {});
+
+    return res.status(201).json({ ok: true, data: order });
+  } catch (e) {
     return jsonErr(res, e);
   }
 });
@@ -699,271 +1081,345 @@ router.post("/cod", requireAuth(), validate(quoteSchema), async (req, res) => {
  * ✅ DO NOT clear cart here (safer UX)
  * ✅ Idempotency supported (returns existing order + existing session.url if possible)
  */
-router.post("/stripe", requireAuth(), validate(quoteSchema), async (req, res) => {
-  let reserved = false;
-  let orderId = null;
-  let lastSessionUsed = false;
-  let couponReserved = false;
-  let couponCodeForReservation = "";
-  let couponReservationExpiresAt = null;
-  let orderCreated = false;
-  let fallbackUsed = false;
-  let cleanupPerformed = false;
-  try {
-    const cartItems = await getCartItemsOrThrow(req.user._id);
-    const b = req.validated.body;
+router.post(
+  "/stripe",
+  optionalAuth(),
+  validate(quoteSchema),
+  async (req, res) => {
+    let reserved = false;
+    let orderId = null;
+    let lastSessionUsed = false;
+    let couponReserved = false;
+    let couponCodeForReservation = "";
+    let couponReservationExpiresAt = null;
+    let orderCreated = false;
+    let fallbackUsed = false;
+    let cleanupPerformed = false;
+    try {
+      const b = req.validated.body;
+      const authUserId = req.user?._id || null;
+      const checkoutUser = authUserId
+        ? req.user
+        : await getOrCreateCheckoutUserFromGuestContact(b.guestContact);
+      const checkoutUserId = checkoutUser?._id;
+      if (!checkoutUserId)
+        throw makeErr(401, "UNAUTHORIZED", "Unable to identify checkout user");
 
-    const idemKey = pickIdempotencyKey(req);
+      const cartItems = authUserId
+        ? await getCartItemsOrThrow(authUserId)
+        : (await getGuestCartItemsOrThrow(req)).items;
 
-    // idempotency: if exists, return existing session if possible
-    const existing = await findExistingCheckoutOrder({
-      userId: req.user._id,
-      idemKey,
-      paymentMethod: "stripe",
-    });
+      const idemKey = pickIdempotencyKey(req);
 
-    if (existing) {
-      const baseData = {
-        orderId: existing._id,
-        orderNumber: existing.orderNumber || "",
-        checkoutUrl: null,
-      };
+      // idempotency: if exists, return existing session if possible
+      const existing = await findExistingCheckoutOrder({
+        userId: checkoutUserId,
+        idemKey,
+        paymentMethod: "stripe",
+      });
 
-      const sessionId = String(existing?.stripe?.sessionId || "");
-      if (sessionId) {
-        try {
-          const sess = await retrieveCheckoutSession(sessionId, { expandPaymentIntent: false });
-          return res.json({
-            ok: true,
-            data: {
-              ...baseData,
-              checkoutUrl: sess?.url || null,
-            },
-          });
-        } catch (e) {
-          req.log.warn({ err: String(e?.message || e) }, "[best-effort] checkout stripe retrieve session failed");
-          // retrieve failed - fall through to return baseData (frontend can retry with new key)
-          return res.json({ ok: true, data: baseData });
+      if (existing) {
+        const baseData = {
+          orderId: existing._id,
+          orderNumber: existing.orderNumber || "",
+          checkoutUrl: null,
+        };
+
+        const sessionId = String(existing?.stripe?.sessionId || "");
+        if (sessionId) {
+          try {
+            const sess = await retrieveCheckoutSession(sessionId, {
+              expandPaymentIntent: false,
+            });
+            return res.json({
+              ok: true,
+              data: {
+                ...baseData,
+                checkoutUrl: sess?.url || null,
+              },
+            });
+          } catch (e) {
+            req.log.warn(
+              { err: String(e?.message || e) },
+              "[best-effort] checkout stripe retrieve session failed",
+            );
+            // retrieve failed - fall through to return baseData (frontend can retry with new key)
+            return res.json({ ok: true, data: baseData });
+          }
         }
+
+        return res.json({ ok: true, data: baseData });
       }
 
-      return res.json({ ok: true, data: baseData });
-    }
+      const shipping = toShippingInput(b);
+      const shippingWithSnapshots = await attachShippingSnapshots(shipping);
 
-    const shipping = toShippingInput(b);
-    const shippingWithSnapshots = await attachShippingSnapshots(shipping);
-
-    const quote = await quotePricing({
-      cartItems,
-      shipping: shippingWithSnapshots,
-      couponCode: b.couponCode,
-      userId: req.user?._id ?? null,
-    });
-
-    // ✅ Check for gift stock warnings - if any gifts are out of stock, reject early
-    const criticalGiftWarnings = (quote.meta?.giftWarnings || []).filter(
-      (w) => w.type === "GIFT_OUT_OF_STOCK"
-    );
-    if (criticalGiftWarnings.length > 0) {
-      return res.status(400).json({
-        ok: false,
-        error: {
-          code: "GIFT_OUT_OF_STOCK",
-          message: "One or more gift items are out of stock",
-          details: criticalGiftWarnings,
-          requestId: getRequestId(req),
-          path: req.originalUrl || req.url || "",
-        },
+      const quote = await quotePricing({
+        cartItems,
+        shipping: shippingWithSnapshots,
+        couponCode: b.couponCode,
+        userId: checkoutUserId,
       });
-    }
 
-    await releaseExpiredReservations().catch((e) => {
-      req.log.warn({ err: String(e?.message || e) }, "[best-effort] checkout release expired reservations failed");
-    });
+      // ✅ Check for gift stock warnings - if any gifts are out of stock, reject early
+      const criticalGiftWarnings = (quote.meta?.giftWarnings || []).filter(
+        (w) => w.type === "GIFT_OUT_OF_STOCK",
+      );
+      if (criticalGiftWarnings.length > 0) {
+        return res.status(400).json({
+          ok: false,
+          error: {
+            code: "GIFT_OUT_OF_STOCK",
+            message: "One or more gift items are out of stock",
+            details: criticalGiftWarnings,
+            requestId: getRequestId(req),
+            path: req.originalUrl || req.url || "",
+          },
+        });
+      }
 
-    const discountTotal = calcDiscountTotal(quote);
-    const couponAppliedCode = String(quote?.discounts?.coupon?.code || "");
-    couponCodeForReservation = couponAppliedCode;
+      await releaseExpiredReservations().catch((e) => {
+        req.log.warn(
+          { err: String(e?.message || e) },
+          "[best-effort] checkout release expired reservations failed",
+        );
+      });
 
-    const orderItems = mapOrderItemsFromQuote(quote);
-    const giftItems = mapGiftItemsFromQuote(quote);
+      const discountTotal = calcDiscountTotal(quote);
+      const couponAppliedCode = String(quote?.discounts?.coupon?.code || "");
+      couponCodeForReservation = couponAppliedCode;
 
-    // ✅ Build reservation items: cart items + gifts (unified stock reservation)
-    const reservationItems = buildReservationItems(quote.items, quote.gifts);
+      const orderItems = mapOrderItemsFromQuote(quote);
+      const giftItems = mapGiftItemsFromQuote(quote);
 
-    const order = await withMongoTransaction(async (session) => {
-      fallbackUsed = session === null;
-      reserved = false;
-      orderCreated = false;
-      orderId = new mongoose.Types.ObjectId();
-      const orderNumber = await getNextOrderNumber(session);
+      // ✅ Build reservation items: cart items + gifts (unified stock reservation)
+      const reservationItems = buildReservationItems(quote.items, quote.gifts);
 
-      if (couponAppliedCode) {
-        const resv = await reserveCouponAtomic({
-          code: couponAppliedCode,
+      const order = await withMongoTransaction(async (session) => {
+        fallbackUsed = session === null;
+        reserved = false;
+        orderCreated = false;
+        orderId = new mongoose.Types.ObjectId();
+        const orderNumber = await getNextOrderNumber(session);
+
+        if (couponAppliedCode) {
+          const resv = await reserveCouponAtomic({
+            code: couponAppliedCode,
+            orderId,
+            userId: checkoutUserId,
+            ttlMinutes: Number(
+              process.env.COUPON_RESERVATION_TTL_MINUTES || 15,
+            ),
+            session,
+          });
+          if (!resv.success) {
+            throw makeErr(
+              400,
+              resv.error || "COUPON_RESERVATION_FAILED",
+              "Coupon could not be reserved",
+            );
+          }
+          couponReserved = true;
+          couponReservationExpiresAt =
+            resv.expiresAt || getCouponReservationExpiry();
+        }
+
+        // ✅ Reserve stock for BOTH items and gifts
+        await reserveStockForOrder({
           orderId,
-          userId: req.user._id,
-          ttlMinutes: Number(process.env.COUPON_RESERVATION_TTL_MINUTES || 15),
+          userId: checkoutUserId,
+          items: reservationItems,
+          ttlMinutes: 15,
           session,
         });
-        if (!resv.success) {
-          throw makeErr(400, resv.error || "COUPON_RESERVATION_FAILED", "Coupon could not be reserved");
+        reserved = true;
+
+        const created = await Order.create(
+          [
+            {
+              _id: orderId,
+              userId: checkoutUserId,
+              orderNumber,
+
+              items: orderItems,
+              gifts: giftItems,
+
+              status: "pending_payment",
+              paymentMethod: "stripe",
+
+              pricing: {
+                subtotal: Number(quote.subtotal || 0),
+                shippingFee: Number(quote.shippingFee || 0),
+                discounts: quote.discounts || {
+                  coupon: { code: null, amount: 0 },
+                  campaign: { amount: 0 },
+                  offer: { amount: 0 },
+                },
+                total: Number(quote.total || 0),
+                vatRate: Number(quote.vatRate || 0),
+                vatIncludedInPrices: Boolean(
+                  quote.vatIncludedInPrices || false,
+                ),
+                vatAmount: Number(quote.vatAmount || 0),
+                totalBeforeVat: Number(quote.totalBeforeVat || 0),
+                totalAfterVat: Number(quote.totalAfterVat || 0),
+
+                // additive legacy
+                discountTotal: Number(discountTotal || 0),
+                couponCode: couponAppliedCode,
+                campaignId: quote?.meta?.campaignId || null,
+
+                // minor mirrors
+                subtotalMinor: Number(quote.subtotalMinor || 0),
+                shippingFeeMinor: Number(quote.shippingFeeMinor || 0),
+                discountTotalMinor: Number(toMinorUnits(discountTotal || 0)),
+                totalMinor: Number(quote.totalMinor || 0),
+                vatAmountMinor: Number(quote.vatAmountMinor || 0),
+                totalBeforeVatMinor: Number(quote.totalBeforeVatMinor || 0),
+                totalAfterVatMinor: Number(quote.totalAfterVatMinor || 0),
+              },
+              pricingMinor: {
+                subtotal: toMinorUnits(quote.subtotal || 0),
+                shippingFee: toMinorUnits(quote.shippingFee || 0),
+                vatAmount: toMinorUnits(quote.vatAmount || 0),
+                totalBeforeVat: toMinorUnits(quote.totalBeforeVat || 0),
+                totalAfterVat: toMinorUnits(quote.totalAfterVat || 0),
+                total: toMinorUnits(quote.total || 0),
+              },
+
+              shipping: shippingWithSnapshots,
+
+              stripe: { sessionId: "", paymentIntentId: "" },
+
+              poNumber: b.poNumber || "",
+              isB2B: Boolean(checkoutUser?.b2bApproved),
+
+              idempotency: {
+                checkoutKey: idemKey || "",
+              },
+
+              couponReservation: couponAppliedCode
+                ? {
+                    code: couponAppliedCode,
+                    status: "reserved",
+                    reservedAt: new Date(),
+                    expiresAt:
+                      couponReservationExpiresAt ||
+                      getCouponReservationExpiry(),
+                  }
+                : undefined,
+            },
+          ],
+          session ? { session } : {},
+        );
+
+        orderCreated = true;
+        return created?.[0] || created;
+      });
+
+      const stripeQuote = buildStripeQuote(quote);
+
+      let session;
+      try {
+        session = await createCheckoutSession({
+          orderId: order._id.toString(),
+          quote: stripeQuote,
+          lang: req.lang,
+          idempotencyKey: idemKey || undefined,
+          customerEmail: checkoutUser.email || undefined,
+        });
+      } catch (err) {
+        await releaseStockReservation({ orderId: order._id }).catch((e) => {
+          req.log.warn(
+            { err: String(e?.message || e) },
+            "[best-effort] checkout release stock reservation failed",
+          );
+        });
+        if (couponAppliedCode) {
+          await releaseCouponReservation({
+            code: couponAppliedCode,
+            orderId: order._id,
+          }).catch((e) => {
+            req.log.warn(
+              { err: String(e?.message || e) },
+              "[best-effort] checkout release coupon reservation failed",
+            );
+          });
         }
-        couponReserved = true;
-        couponReservationExpiresAt = resv.expiresAt || getCouponReservationExpiry();
+        await Order.updateOne(
+          { _id: order._id, status: "pending_payment" },
+          {
+            $set: {
+              status: "cancelled",
+              internalNote: "Checkout session creation failed (auto-cancelled)",
+              ...(couponAppliedCode
+                ? { "couponReservation.status": "released" }
+                : {}),
+            },
+          },
+        ).catch((e) => {
+          req.log.warn(
+            { err: String(e?.message || e) },
+            "[best-effort] checkout cleanup order cancel failed",
+          );
+        });
+        cleanupPerformed = true;
+        throw err;
       }
 
-      // ✅ Reserve stock for BOTH items and gifts
-      await reserveStockForOrder({
-        orderId,
-        userId: req.user._id,
-        items: reservationItems,
-        ttlMinutes: 15,
-        session,
+      order.stripe = order.stripe || {};
+      order.stripe.sessionId = String(session?.id || "");
+      await order.save();
+
+      return res.json({
+        ok: true,
+        data: {
+          orderId: order._id,
+          orderNumber: order.orderNumber || "",
+          checkoutUrl: session?.url || null,
+        },
       });
-      reserved = true;
-
-      const created = await Order.create(
-        [
-          {
-            _id: orderId,
-            userId: req.user._id,
-            orderNumber,
-
-            items: orderItems,
-            gifts: giftItems,
-
-            status: "pending_payment",
-            paymentMethod: "stripe",
-
-            pricing: {
-              subtotal: Number(quote.subtotal || 0),
-              shippingFee: Number(quote.shippingFee || 0),
-              discounts: quote.discounts || {
-                coupon: { code: null, amount: 0 },
-                campaign: { amount: 0 },
-                offer: { amount: 0 },
-              },
-              total: Number(quote.total || 0),
-              vatRate: Number(quote.vatRate || 0),
-              vatIncludedInPrices: Boolean(quote.vatIncludedInPrices || false),
-              vatAmount: Number(quote.vatAmount || 0),
-              totalBeforeVat: Number(quote.totalBeforeVat || 0),
-              totalAfterVat: Number(quote.totalAfterVat || 0),
-
-              // additive legacy
-              discountTotal: Number(discountTotal || 0),
-              couponCode: couponAppliedCode,
-              campaignId: quote?.meta?.campaignId || null,
-
-              // minor mirrors
-              subtotalMinor: Number(quote.subtotalMinor || 0),
-              shippingFeeMinor: Number(quote.shippingFeeMinor || 0),
-              discountTotalMinor: Number(toMinorUnits(discountTotal || 0)),
-              totalMinor: Number(quote.totalMinor || 0),
-              vatAmountMinor: Number(quote.vatAmountMinor || 0),
-              totalBeforeVatMinor: Number(quote.totalBeforeVatMinor || 0),
-              totalAfterVatMinor: Number(quote.totalAfterVatMinor || 0),
-            },
-            pricingMinor: {
-              subtotal: toMinorUnits(quote.subtotal || 0),
-              shippingFee: toMinorUnits(quote.shippingFee || 0),
-              vatAmount: toMinorUnits(quote.vatAmount || 0),
-              totalBeforeVat: toMinorUnits(quote.totalBeforeVat || 0),
-              totalAfterVat: toMinorUnits(quote.totalAfterVat || 0),
-              total: toMinorUnits(quote.total || 0),
-            },
-
-            shipping: shippingWithSnapshots,
-
-            stripe: { sessionId: "", paymentIntentId: "" },
-
-            idempotency: {
-              checkoutKey: idemKey || "",
-            },
-
-            couponReservation: couponAppliedCode
-              ? {
-                code: couponAppliedCode,
-                status: "reserved",
-                reservedAt: new Date(),
-                expiresAt: couponReservationExpiresAt || getCouponReservationExpiry(),
-              }
-              : undefined,
-          },
-        ],
-        session ? { session } : {}
-      );
-
-      orderCreated = true;
-      return created?.[0] || created;
-    });
-
-    const stripeQuote = buildStripeQuote(quote);
-
-    let session;
-    try {
-      session = await createCheckoutSession({
-        orderId: order._id.toString(),
-        quote: stripeQuote,
-        lang: req.lang,
-        idempotencyKey: idemKey || undefined,
-      });
-    } catch (err) {
-      await releaseStockReservation({ orderId: order._id }).catch((e) => {
-        req.log.warn({ err: String(e?.message || e) }, "[best-effort] checkout release stock reservation failed");
-      });
-      if (couponAppliedCode) {
-        await releaseCouponReservation({ code: couponAppliedCode, orderId: order._id }).catch((e) => {
-          req.log.warn({ err: String(e?.message || e) }, "[best-effort] checkout release coupon reservation failed");
+    } catch (e) {
+      if (!cleanupPerformed && fallbackUsed && reserved && orderId) {
+        await releaseStockReservation({ orderId }).catch((err) => {
+          req.log.warn(
+            { err: String(err?.message || err) },
+            "[best-effort] checkout release stock reservation failed",
+          );
         });
       }
-      await Order.updateOne(
-        { _id: order._id, status: "pending_payment" },
-        {
-          $set: {
-            status: "cancelled",
-            internalNote: "Checkout session creation failed (auto-cancelled)",
-            ...(couponAppliedCode ? { "couponReservation.status": "released" } : {}),
-          },
-        }
-      ).catch((e) => {
-        req.log.warn({ err: String(e?.message || e) }, "[best-effort] checkout cleanup order cancel failed");
-      });
-      cleanupPerformed = true;
-      throw err;
+      if (!cleanupPerformed && fallbackUsed && orderCreated && orderId) {
+        await Order.deleteOne({
+          _id: orderId,
+          status: "pending_payment",
+          "stripe.sessionId": "",
+        }).catch((err) => {
+          req.log.warn(
+            { err: String(err?.message || err) },
+            "[best-effort] checkout cleanup delete order failed",
+          );
+        });
+      }
+      if (
+        !cleanupPerformed &&
+        fallbackUsed &&
+        couponReserved &&
+        couponCodeForReservation &&
+        orderId
+      ) {
+        await releaseCouponReservation({
+          code: couponCodeForReservation,
+          orderId,
+        }).catch((cleanupErr) => {
+          req.log.warn(
+            { err: String(cleanupErr?.message || cleanupErr) },
+            "[best-effort] checkout release coupon reservation failed",
+          );
+        });
+      }
+      return jsonErr(res, e);
     }
-
-    order.stripe = order.stripe || {};
-    order.stripe.sessionId = String(session?.id || "");
-    await order.save();
-
-    return res.json({
-      ok: true,
-      data: {
-        orderId: order._id,
-        orderNumber: order.orderNumber || "",
-        checkoutUrl: session?.url || null,
-      },
-    });
-  } catch (e) {
-    if (!cleanupPerformed && fallbackUsed && reserved && orderId) {
-      await releaseStockReservation({ orderId }).catch((err) => {
-        req.log.warn({ err: String(err?.message || err) }, "[best-effort] checkout release stock reservation failed");
-      });
-    }
-    if (!cleanupPerformed && fallbackUsed && orderCreated && orderId) {
-      await Order.deleteOne({ _id: orderId, status: "pending_payment", "stripe.sessionId": "" }).catch((err) => {
-        req.log.warn({ err: String(err?.message || err) }, "[best-effort] checkout cleanup delete order failed");
-      });
-    }
-    if (!cleanupPerformed && fallbackUsed && couponReserved && couponCodeForReservation && orderId) {
-      await releaseCouponReservation({ code: couponCodeForReservation, orderId }).catch((cleanupErr) => {
-        req.log.warn({ err: String(cleanupErr?.message || cleanupErr) }, "[best-effort] checkout release coupon reservation failed");
-      });
-    }
-    return jsonErr(res, e);
-  }
-});
+  },
+);
 
 export default router;

@@ -240,6 +240,8 @@ const refundSchema = new mongoose.Schema(
     failureCode: { type: String, default: "" },
     failureMessage: { type: String, default: "" },
 
+    manualTransferRequired: { type: Boolean, default: false },
+
     requestedAt: { type: Date, default: null },
     refundedAt: { type: Date, default: null },
   },
@@ -473,7 +475,12 @@ const orderSchema = new mongoose.Schema(
     shippedAt: { type: Date, default: null },
     deliveredAt: { type: Date, default: null },
 
-    paymentMethod: { type: String, enum: ["stripe", "cod"], required: true },
+    paymentMethod: { type: String, enum: ["stripe", "cod", "bank_transfer", "net_terms"], required: true },
+    paymentDueAt: { type: Date, default: null },
+
+    // B2B fields
+    poNumber: { type: String, default: "", maxlength: 100 },
+    isB2B: { type: Boolean, default: false },
 
     // ✅ Source of truth pricing
     pricing: { type: pricingSchema, required: true },
@@ -522,6 +529,12 @@ const orderSchema = new mongoose.Schema(
      * Internal notes (admin/support)
      */
     internalNote: { type: String, default: "" },
+
+    /**
+     * Confirmation email tracking (duplicate prevention)
+     * Set to a Date once the order confirmation email has been successfully sent.
+     */
+    confirmationEmailSentAt: { type: Date, default: null },
   },
   {
     timestamps: true,

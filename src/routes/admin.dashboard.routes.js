@@ -6,6 +6,8 @@ import { DateTime } from "luxon";
 import { Order } from "../models/Order.js";
 import { ReturnRequest } from "../models/ReturnRequest.js";
 import { Product } from "../models/Product.js";
+import { User } from "../models/User.js";
+import { RFQ } from "../models/RFQ.js";
 
 import { requireAuth, requireAnyPermission, PERMISSIONS } from "../middleware/auth.js";
 import { sendOk, sendError } from "../utils/response.js";
@@ -470,5 +472,116 @@ function setDashboardHeaders(req, res, payload) {
   }
   return false;
 }
+
+/* ============================
+   GET /api/admin/dashboard/b2b
+   B2B Analytics
+============================ */
+
+router.get("/b2b", async (req, res) => {
+  try {
+    const [
+      totalB2BUsers,
+      pendingApplications,
+      approvedUsers,
+      tierCounts,
+      b2bOrders,
+      rfqCounts,
+    ] = await Promise.all([
+      User.countDocuments({ accountType: "business" }),
+      User.countDocuments({ b2bAppliedAt: { $ne: null }, b2bApproved: false, b2bRejectedAt: null }),
+      User.countDocuments({ b2bApproved: true }),
+      User.aggregate([
+        { $match: { b2bApproved: true } },
+        { $group: { _id: "$wholesaleTier", count: { $sum: 1 } } },
+      ]),
+      Order.aggregate([
+        { $match: { isB2B: true } },
+        {
+          $group: {
+            _id: null,
+            totalOrders: { $sum: 1 },
+            totalRevenue: { $sum: "$pricing.total" },
+            avgOrderValue: { $avg: "$pricing.total" },
+          },
+        },
+      ]),
+      RFQ.aggregate([
+        {
+          $group: {
+            _id: "$status",
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+    ]);
+
+    const tierMap = {};
+    for (const t of tierCounts) {
+      tierMap[t._id || "none"] = t.count;
+    }
+
+    const rfqMap = {};
+    for (const r of rfqCounts) {
+      rfqMap[r._id] = r.count;
+    }
+
+    const orderStats = b2bOrders[0] || { totalOrders: 0, totalRevenue: 0, avgOrderValue: 0 };
+
+    // Top B2B customers by revenue
+    const topCustomers = await Order.aggregate([
+      { $match: { isB2B: true } },
+      {
+        $group: {
+          _id: "$userId",
+          totalSpent: { $sum: "$pricing.total" },
+          orderCount: { $sum: 1 },
+        },
+      },
+      { $sort: { totalSpent: -1 } },
+      { $limit: 10 },
+      {
+        $lookup: {
+          from: "users",
+          localField: "_id",
+          foreignField: "_id",
+          as: "user",
+        },
+      },
+      { $unwind: { path: "$user", preserveNullAndEmptyArrays: true } },
+      {
+        $project: {
+          userId: "$_id",
+          businessName: "$user.businessName",
+          email: "$user.email",
+          wholesaleTier: "$user.wholesaleTier",
+          totalSpent: 1,
+          orderCount: 1,
+        },
+      },
+    ]);
+
+    return res.json({
+      ok: true,
+      data: {
+        users: {
+          total: totalB2BUsers,
+          pending: pendingApplications,
+          approved: approvedUsers,
+          tiers: tierMap,
+        },
+        orders: {
+          total: orderStats.totalOrders,
+          revenue: Number(orderStats.totalRevenue).toFixed(2),
+          avgOrderValue: Number(orderStats.avgOrderValue).toFixed(2),
+        },
+        rfqs: rfqMap,
+        topCustomers,
+      },
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: { code: "INTERNAL_ERROR", message: e.message } });
+  }
+});
 
 export default router;

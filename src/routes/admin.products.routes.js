@@ -386,6 +386,7 @@ const ALLOWED_PATCH_FIELDS = new Set([
   "packageIncludesAr",
   "compatibility",
   "publishContent",
+  "wholesalePricing",
 ]);
 
 // Computed fields that must NEVER be updated directly
@@ -514,11 +515,23 @@ const publishContentSchema = z
   })
   .optional();
 
+const wholesalePricingSchema = z
+  .array(
+    z.object({
+      tier: z.enum(["bronze", "silver", "gold"]),
+      price: z.number().min(0),
+      minQty: z.number().int().min(1).optional().default(1),
+    })
+  )
+  .max(3)
+  .optional();
+
 const listQuerySchema = z.object({
   query: z
     .object({
       search: z.string().max(120).optional(),
       categoryId: z.string().optional(),
+      brand: z.string().max(120).optional(),
       isActive: z.enum(["true", "false"]).optional(),
       isDeleted: z.enum(["true", "false"]).optional(),
       hasVariants: z.enum(["true", "false"]).optional(),
@@ -577,6 +590,7 @@ const createBodySchema = z
     compatibility: compatibilitySchema,
     publishContent: publishContentSchema,
     variants: z.array(variantSchema).optional(),
+    wholesalePricing: wholesalePricingSchema,
   })
   .strict()
   .superRefine((b, ctx) => {
@@ -639,6 +653,7 @@ const patchBodySchema = z
     packageIncludesAr: z.array(z.string().max(200)).max(50).optional(),
     compatibility: compatibilitySchema,
     publishContent: publishContentSchema,
+    wholesalePricing: wholesalePricingSchema,
   })
   .strict()
   .superRefine((b, ctx) => {
@@ -735,6 +750,10 @@ router.get("/", validate(listQuerySchema), async (req, res) => {
         throw makeErr(400, "INVALID_CATEGORY_ID", "Invalid categoryId");
       }
       filter.categoryId = q.categoryId;
+    }
+
+    if (q.brand) {
+      filter.brand = q.brand;
     }
 
     if (q.hasVariants === "true") {
@@ -1316,6 +1335,279 @@ router.patch("/:id/images", validate(imagesUpdateSchema), async (req, res) => {
 
     invalidateProductCaches();
     return jsonRes(res, mapProductAdmin(product, req.lang));
+  } catch (e) {
+    return jsonErr(res, e);
+  }
+});
+
+/* ============================
+   POST /api/admin/products/bulk-wholesale
+   Bulk set wholesale pricing for multiple products.
+   mode "percentage": computes price = product.price * (1 - value/100)
+   mode "absolute":   uses value directly as the price
+============================ */
+
+const bulkWholesaleBodySchema = z
+  .object({
+    productIds: z.array(z.string().min(1)).min(1).max(100),
+    mode: z.enum(["absolute", "percentage"]),
+    tiers: z
+      .array(
+        z.object({
+          tier: z.enum(["bronze", "silver", "gold"]),
+          value: z.number().min(0),
+          minQty: z.number().int().min(1).default(1),
+        })
+      )
+      .min(1)
+      .max(3),
+  })
+  .strict()
+  .superRefine((b, ctx) => {
+    if (b.mode === "percentage") {
+      b.tiers.forEach((t, i) => {
+        if (t.value > 100) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["tiers", i, "value"],
+            message: "Discount percentage cannot exceed 100",
+          });
+        }
+      });
+    }
+    // Validate tier ordering by extracting bronze/silver/gold values
+    const vals = Object.fromEntries(b.tiers.map((t) => [t.tier, t.value]));
+    const { bronze, silver, gold } = vals;
+    if (b.mode === "percentage") {
+      if (bronze != null && silver != null && bronze >= silver) {
+        ctx.addIssue({ code: "custom", path: ["tiers"], message: "Silver discount must be higher than Bronze" });
+      }
+      if (silver != null && gold != null && silver >= gold) {
+        ctx.addIssue({ code: "custom", path: ["tiers"], message: "Gold discount must be higher than Silver" });
+      }
+    } else {
+      if (bronze != null && silver != null && bronze <= silver) {
+        ctx.addIssue({ code: "custom", path: ["tiers"], message: "Silver price must be lower than Bronze" });
+      }
+      if (silver != null && gold != null && silver <= gold) {
+        ctx.addIssue({ code: "custom", path: ["tiers"], message: "Gold price must be lower than Silver" });
+      }
+    }
+  });
+
+router.post("/bulk-wholesale", validate(z.object({ body: bulkWholesaleBodySchema })), async (req, res) => {
+  try {
+    const { productIds, mode, tiers } = req.validated.body;
+
+    // Validate and deduplicate product IDs
+    const validIds = [...new Set(productIds)].filter((id) => isValidObjectId(id));
+    if (validIds.length === 0) {
+      throw makeErr(400, "INVALID_PRODUCT_IDS", "No valid product IDs provided");
+    }
+
+    // Fetch all target products in one query
+    const products = await Product.find({ _id: { $in: validIds }, isDeleted: { $ne: true } })
+      .select("_id price")
+      .lean();
+
+    const foundIds = new Set(products.map((p) => String(p._id)));
+    const skipped = validIds.length - foundIds.size;
+
+    if (products.length === 0) {
+      return jsonRes(res, { updated: 0, skipped: validIds.length, errors: ["No products found"] });
+    }
+
+    // Build bulk write operations
+    const bulkOps = products.map((product) => {
+      const wholesalePricing = tiers.map((t) => {
+        let price;
+        if (mode === "percentage") {
+          price = Math.round(product.price * (1 - t.value / 100) * 100) / 100;
+        } else {
+          price = t.value;
+        }
+        return { tier: t.tier, price, minQty: t.minQty };
+      });
+
+      return {
+        updateOne: {
+          filter: { _id: product._id },
+          update: { $set: { wholesalePricing, updatedAt: new Date() } },
+        },
+      };
+    });
+
+    const result = await Product.bulkWrite(bulkOps);
+    invalidateProductCaches();
+
+    return jsonRes(res, {
+      updated: result.modifiedCount ?? products.length,
+      skipped,
+      errors: [],
+    });
+  } catch (e) {
+    return jsonErr(res, e);
+  }
+});
+
+/* ============================
+   POST /api/admin/products/bulk-discount
+   Apply a sale discount (percent, fixed, or clear) to a scoped set of products.
+   scope.target = "all" | "category" | "brand" | "products"
+   discount.mode = "percent" | "fixed" | "clear"
+============================ */
+
+const bulkDiscountBodySchema = z
+  .object({
+    scope: z
+      .object({
+        target: z.enum(["all", "category", "brand", "products"]),
+        categoryId: z.string().optional(),
+        brand: z.string().max(120).optional(),
+        productIds: z.array(z.string()).max(500).optional(),
+        onlyActive: z.boolean().optional(),
+      })
+      .strict(),
+    discount: z
+      .object({
+        mode: z.enum(["percent", "fixed", "clear"]),
+        value: z.number().min(0).optional(),
+        saleStartAt: z.string().datetime().nullable().optional(),
+        saleEndAt: z.string().datetime().nullable().optional(),
+      })
+      .strict(),
+  })
+  .strict()
+  .superRefine((b, ctx) => {
+    const { target, categoryId, brand, productIds } = b.scope;
+    const { mode, value } = b.discount;
+
+    if (target === "category" && !categoryId) {
+      ctx.addIssue({ code: "custom", path: ["scope", "categoryId"], message: "categoryId is required when target is 'category'" });
+    }
+    if (target === "brand" && !brand) {
+      ctx.addIssue({ code: "custom", path: ["scope", "brand"], message: "brand is required when target is 'brand'" });
+    }
+    if (target === "products" && (!productIds || productIds.length === 0)) {
+      ctx.addIssue({ code: "custom", path: ["scope", "productIds"], message: "productIds is required when target is 'products'" });
+    }
+    if ((mode === "percent" || mode === "fixed") && (value == null || isNaN(value))) {
+      ctx.addIssue({ code: "custom", path: ["discount", "value"], message: "value is required for percent or fixed mode" });
+    }
+    if (mode === "percent" && value != null && value > 100) {
+      ctx.addIssue({ code: "custom", path: ["discount", "value"], message: "Percentage cannot exceed 100" });
+    }
+    if (mode === "fixed" && value != null && value <= 0) {
+      ctx.addIssue({ code: "custom", path: ["discount", "value"], message: "Fixed discount value must be greater than 0" });
+    }
+  });
+
+router.post("/bulk-discount", validate(z.object({ body: bulkDiscountBodySchema })), async (req, res) => {
+  try {
+    const { scope, discount } = req.validated.body;
+
+    // Build MongoDB filter
+    const filter = { isDeleted: { $ne: true } };
+
+    if (scope.onlyActive) {
+      filter.isActive = true;
+    }
+
+    switch (scope.target) {
+      case "category": {
+        if (!isValidObjectId(scope.categoryId)) {
+          throw makeErr(400, "INVALID_CATEGORY_ID", "Invalid categoryId");
+        }
+        filter.categoryId = scope.categoryId;
+        break;
+      }
+      case "brand": {
+        filter.brand = scope.brand;
+        break;
+      }
+      case "products": {
+        const validIds = [...new Set(scope.productIds)].filter((id) => isValidObjectId(id));
+        if (validIds.length === 0) {
+          throw makeErr(400, "INVALID_PRODUCT_IDS", "No valid product IDs provided");
+        }
+        filter._id = { $in: validIds };
+        break;
+      }
+      // "all" — no extra filter
+    }
+
+    // Fetch matching products (only fields needed for computation)
+    const products = await Product.find(filter).select("_id price").lean();
+
+    if (products.length === 0) {
+      return jsonRes(res, { updated: 0, skipped: 0, errors: [] });
+    }
+
+    const toMinor = (val) => (val != null ? Math.round(val * 100) : null);
+
+    // Build bulk write operations
+    const bulkOps = [];
+    let skipped = 0;
+
+    for (const product of products) {
+      let fields;
+
+      if (discount.mode === "clear") {
+        fields = {
+          sale: false,
+          salePrice: null,
+          salePriceMinor: null,
+          discountPercent: null,
+          saleStartAt: null,
+          saleEndAt: null,
+        };
+      } else {
+        let salePrice;
+        if (discount.mode === "percent") {
+          salePrice = Math.round(product.price * (1 - discount.value / 100) * 100) / 100;
+        } else {
+          // fixed: salePrice = price - value
+          salePrice = Math.round((product.price - discount.value) * 100) / 100;
+        }
+
+        // Skip products where computed salePrice would be invalid
+        if (salePrice <= 0 || salePrice >= product.price) {
+          skipped++;
+          continue;
+        }
+
+        const computedDiscountPct = Math.round(((product.price - salePrice) / product.price) * 10000) / 100;
+
+        fields = {
+          sale: true,
+          salePrice,
+          salePriceMinor: toMinor(salePrice),
+          discountPercent: computedDiscountPct,
+          saleStartAt: discount.saleStartAt ? new Date(discount.saleStartAt) : null,
+          saleEndAt: discount.saleEndAt ? new Date(discount.saleEndAt) : null,
+        };
+      }
+
+      bulkOps.push({
+        updateOne: {
+          filter: { _id: product._id },
+          update: { $set: { ...fields, updatedAt: new Date() } },
+        },
+      });
+    }
+
+    if (bulkOps.length === 0) {
+      return jsonRes(res, { updated: 0, skipped, errors: ["No eligible products found (all skipped due to invalid computed price)"] });
+    }
+
+    const result = await Product.bulkWrite(bulkOps);
+    invalidateProductCaches();
+
+    return jsonRes(res, {
+      updated: result.modifiedCount ?? bulkOps.length,
+      skipped,
+      errors: [],
+    });
   } catch (e) {
     return jsonErr(res, e);
   }

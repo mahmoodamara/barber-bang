@@ -15,6 +15,7 @@ import {
   releaseExpiredReservations,
 } from "../services/products.service.js";
 import { issueInvoiceWithLock } from "../services/invoice.service.js";
+import { sendOrderConfirmationSafe } from "../services/email.service.js";
 
 import { Order } from "../models/Order.js";
 import { User } from "../models/User.js";
@@ -22,6 +23,7 @@ import { Payment } from "../models/Payment.js";
 import { StripeWebhookEvent } from "../models/StripeWebhookEvent.js";
 import { getRequestId } from "../middleware/error.js";
 import { recordOrderSale } from "../services/ranking.service.js";
+import { evaluateTierProgression } from "../services/tierProgression.service.js";
 import { log } from "../utils/logger.js";
 import { onWebhookFailure } from "../utils/alertHooks.js";
 import { getWebhookEventCounter, getRefundOperationsCounter } from "../middleware/prometheus.js";
@@ -336,14 +338,84 @@ router.post(
     const event = constructWebhookEvent(rawBody, sig);
 
     type = String(event?.type || "");
-    const accepted = new Set([
+    const checkoutEvents = new Set([
       "checkout.session.completed",
       "checkout.session.async_payment_succeeded",
       "checkout.session.async_payment_failed",
     ]);
 
-    if (!accepted.has(type)) return safe200(res);
+    const refundEvents = new Set(["charge.refunded"]);
 
+    if (!checkoutEvents.has(type) && !refundEvents.has(type)) return safe200(res);
+
+    // ---------- Handle charge.refunded (Stripe-dashboard or external refunds) ----------
+    if (refundEvents.has(type)) {
+      const charge = event?.data?.object || {};
+      const paymentIntentId = String(charge?.payment_intent || "");
+      eventId = String(event?.id || "").trim();
+      if (!paymentIntentId || !eventId) return safe200(res);
+
+      webhookEventsTotal.inc({ type, status: "received" });
+
+      // Idempotent event record
+      const evtRec = await StripeWebhookEvent.findOneAndUpdate(
+        { eventId },
+        { $setOnInsert: { eventId, status: "received" }, $set: { type }, $inc: { attempts: 1 } },
+        { new: true, upsert: true }
+      ).catch(() => null);
+      if (evtRec?.status === "processed") return safe200(res);
+
+      const order = await Order.findOne({
+        paymentMethod: "stripe",
+        "stripe.paymentIntentId": paymentIntentId,
+      });
+
+      if (!order) {
+        await StripeWebhookEvent.updateOne({ eventId }, { $set: { status: "failed", failureStep: "order_lookup", lastError: "Order not found for paymentIntent", lastErrorAt: new Date() } }).catch(() => {});
+        return safe200(res);
+      }
+
+      // Only update if not already marked as succeeded
+      if (order?.refund?.status !== "succeeded") {
+        const refundAmount = typeof charge?.amount_refunded === "number"
+          ? Math.round(charge.amount_refunded) / 100
+          : Number(order?.pricing?.total ?? 0);
+        const isPartial = refundAmount > 0 && refundAmount < Number(order?.pricing?.total ?? 0);
+
+        const latestRefundId = Array.isArray(charge?.refunds?.data) && charge.refunds.data.length
+          ? String(charge.refunds.data[0]?.id || "")
+          : "";
+
+        await Order.updateOne(
+          { _id: order._id },
+          {
+            $set: {
+              status: isPartial ? "partially_refunded" : "refunded",
+              "refund.status": "succeeded",
+              "refund.amount": refundAmount,
+              "refund.currency": "ils",
+              "refund.stripeRefundId": latestRefundId,
+              "refund.refundedAt": new Date(),
+            },
+          }
+        );
+
+        try {
+          const { sendRefundNotificationSafe } = await import("../services/email.service.js");
+          sendRefundNotificationSafe(order._id, refundAmount).catch(() => {});
+        } catch { /* best-effort */ }
+      }
+
+      await StripeWebhookEvent.updateOne(
+        { eventId },
+        { $set: { status: "processed", processedAt: new Date(), orderId: order._id } }
+      ).catch(() => {});
+
+      webhookEventsTotal.inc({ type, status: "success" });
+      return safe200(res);
+    }
+
+    // ---------- Handle checkout events ----------
     const session = event?.data?.object || {};
     const sessionId = String(session?.id || "");
     if (!sessionId) return safe200(res);
@@ -863,6 +935,23 @@ router.post(
     }).catch((e) => {
       req.log.warn({ err: String(e?.message || e), orderId: paidOrder._id }, "[stripe.webhook] invoice best-effort failed");
     });
+
+    log.info(
+      { orderId: String(paidOrder._id), orderNumber: paidOrder.orderNumber || "" },
+      "[stripe.webhook] triggering confirmation email"
+    );
+    await sendOrderConfirmationSafe(paidOrder._id).catch((e) => {
+      req.log.warn({ err: String(e?.message || e), orderId: paidOrder._id }, "[stripe.webhook] confirmation email best-effort failed");
+    });
+    log.info(
+      { orderId: String(paidOrder._id) },
+      "[stripe.webhook] confirmation email trigger complete"
+    );
+
+    // B2B tier progression evaluation (best-effort)
+    if (paidOrder.isB2B && paidOrder.userId) {
+      evaluateTierProgression(paidOrder.userId, Number(paidOrder.pricing?.total || 0)).catch(() => {});
+    }
 
     await Order.updateOne(
       { _id: paidOrder._id, "webhook.lockId": lockId },
