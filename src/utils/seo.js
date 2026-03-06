@@ -32,17 +32,17 @@ export function buildCanonicalUrl(path, lang = null) {
 /**
  * Build alternate language URLs (hreflang)
  * @param {string} path - Path without leading slash
- * @returns {{ he: string, ar: string, xDefault: string }}
+ * @returns {Array<{ lang: string, hreflang: string, url: string }>}
  */
 export function buildAlternates(path) {
   const cleanPath = String(path || "").replace(/^\/+/, "");
   const fullPath = cleanPath ? `${STORE_BASE_URL}/${cleanPath}` : STORE_BASE_URL;
 
-  return {
-    he: `${fullPath}?lang=he`,
-    ar: `${fullPath}?lang=ar`,
-    xDefault: fullPath,
-  };
+  return [
+    { lang: "he", hreflang: "he", url: `${fullPath}?lang=he` },
+    { lang: "ar", hreflang: "ar", url: `${fullPath}?lang=ar` },
+    { lang: "x-default", hreflang: "x-default", url: fullPath },
+  ];
 }
 
 /**
