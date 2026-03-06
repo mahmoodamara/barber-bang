@@ -68,6 +68,8 @@ function mapUser(u) {
     // B2B / Wholesale fields
     accountType: obj.accountType || "individual",
     businessName: obj.businessName || "",
+    b2bPhone: obj.b2bPhone || "",
+    b2bMessage: obj.b2bMessage || "",
     businessId: obj.businessId || "",
     taxId: obj.taxId || "",
     wholesaleTier: obj.wholesaleTier || "none",
@@ -274,7 +276,7 @@ router.get("/b2b", validate(b2bListQuerySchema), async (req, res) => {
       const search = String(q.q).trim().slice(0, 120);
       if (search) {
         const regex = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-        const searchCondition = { $or: [{ name: regex }, { email: regex }, { businessName: regex }] };
+        const searchCondition = { $or: [{ name: regex }, { email: regex }, { businessName: regex }, { b2bPhone: regex }, { b2bMessage: regex }] };
         filter = { $and: [filter, searchCondition] };
       }
     }

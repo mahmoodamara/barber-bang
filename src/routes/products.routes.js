@@ -64,6 +64,10 @@ function sanitizeSearchQuery(input, maxLen = 64) {
     .trim();
 }
 
+function escapeRegex(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function isValidObjectId(id) {
   return mongoose.Types.ObjectId.isValid(String(id || ""));
 }
@@ -219,6 +223,15 @@ function mapVariant(v) {
   };
 }
 
+function pickDefaultVariant(rawVariants) {
+  if (!Array.isArray(rawVariants) || rawVariants.length === 0) return null;
+  return (
+    rawVariants.find((v) => Number(v?.stock ?? 0) > 0) ||
+    rawVariants[0] ||
+    null
+  );
+}
+
 /**
  * Map product image for public API response
  */
@@ -254,6 +267,9 @@ function getMainImage(p) {
 
 function mapProductListItem(p, lang, now) {
   const onSale = isSaleActiveByPrice(p, now);
+  const mappedVariants = Array.isArray(p.variants) ? p.variants.map(mapVariant) : [];
+  const hasVariants = mappedVariants.length > 0;
+  const defaultVariant = hasVariants ? mapVariant(pickDefaultVariant(p.variants)) : null;
 
   // Map images array
   const images = Array.isArray(p.images)
@@ -298,7 +314,9 @@ function mapProductListItem(p, lang, now) {
     warrantyInfo: p.warrantyInfo || "",
     slug: p.slug || "",
 
-    variants: Array.isArray(p.variants) ? p.variants.map(mapVariant) : [],
+    hasVariants,
+    defaultVariant,
+    variants: mappedVariants,
 
     // NOTE: isFeatured/isBestSeller removed from public API.
     // Rankings must be computed from real data via ranking endpoints.
@@ -365,7 +383,8 @@ function mapProductDetailsDoc(item, lang) {
 
 /* ============================================================================
    PRODUCTS LISTING (Filters + Pagination)
-   GET /api/products?q&categoryId&minPrice&maxPrice&onSale&inStock&featured&sort&page&limit
+   GET /api/products?q&categoryId&minPrice&maxPrice&onSale&inStock
+       &rating_gte&discount_gte&compat_model&sort&page&limit
 ============================================================================ */
 
 router.get("/", async (req, res) => {
@@ -385,12 +404,24 @@ router.get("/", async (req, res) => {
     const onSale = String(req.query.onSale || "false") === "true";
     const inStock = String(req.query.inStock || "false") === "true";
     const brand = String(req.query.brand || "").trim();
+    const ratingGteRaw =
+      req.query.rating_gte != null ? Number(req.query.rating_gte) : null;
+    const discountGteRaw =
+      req.query.discount_gte != null ? Number(req.query.discount_gte) : null;
+    const ratingGte = Number.isFinite(ratingGteRaw)
+      ? Math.min(Math.max(ratingGteRaw, 0), 5)
+      : null;
+    const discountGte = Number.isFinite(discountGteRaw)
+      ? Math.min(Math.max(discountGteRaw, 0), 100)
+      : null;
+    const compatModel = sanitizeSearchQuery(req.query.compat_model, 80);
     // NOTE: `featured` query param is IGNORED for public endpoints.
     // Featured/best-seller lists must use the ranking endpoints (/products/featured, /products/best-sellers).
     // See: NO MANUAL FLAGS store rule.
     const sort = String(req.query.sort || "newest").trim();
 
     const filter = { isActive: true, isDeleted: { $ne: true } };
+    const andClauses = [];
 
     // Text search (uses text index)
     if (q) {
@@ -408,11 +439,18 @@ router.get("/", async (req, res) => {
     // Brand filter (case-insensitive)
     if (brand) {
       filter.brand = {
-        $regex: new RegExp(
-          `^${brand.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
-          "i",
-        ),
+        $regex: new RegExp(`^${escapeRegex(brand)}$`, "i"),
       };
+    }
+
+    // Rating filter (average rating, inclusive)
+    if (ratingGte != null) {
+      andClauses.push({
+        $or: [
+          { "stats.ratingAvg": { $gte: ratingGte } },
+          { ratingAvg: { $gte: ratingGte } }, // legacy docs fallback
+        ],
+      });
     }
 
     // Price range filters (base price)
@@ -425,10 +463,12 @@ router.get("/", async (req, res) => {
 
     // In stock filter
     if (inStock) {
-      filter.$or = [
-        { "variants.0": { $exists: false }, stock: { $gt: 0 } },
-        { "variants.stock": { $gt: 0 } },
-      ];
+      andClauses.push({
+        $or: [
+          { "variants.0": { $exists: false }, stock: { $gt: 0 } },
+          { "variants.stock": { $gt: 0 } },
+        ],
+      });
     }
 
     // NOTE: Featured filter removed - use ranking endpoints instead.
@@ -440,19 +480,61 @@ router.get("/", async (req, res) => {
      * AND (saleStartAt null OR saleStartAt <= now)
      * AND (saleEndAt null OR saleEndAt >= now)
      */
-    if (onSale) {
+    if (onSale || discountGte != null) {
       filter.salePrice = { $ne: null };
-      filter.$expr = { $lt: ["$salePrice", "$price"] };
+      andClauses.push({ $expr: { $lt: ["$salePrice", "$price"] } });
 
-      filter.$and = [
-        ...(filter.$and || []),
+      andClauses.push(
         {
           $or: [{ saleStartAt: null }, { saleStartAt: { $lte: now } }],
         },
         {
           $or: [{ saleEndAt: null }, { saleEndAt: { $gte: now } }],
         },
-      ];
+      );
+    }
+
+    // Discount depth filter (based on actual active sale depth)
+    if (discountGte != null) {
+      andClauses.push({
+        $expr: {
+          $and: [
+            { $gt: ["$price", 0] },
+            {
+              $gte: [
+                {
+                  $multiply: [
+                    {
+                      $divide: [{ $subtract: ["$price", "$salePrice"] }, "$price"],
+                    },
+                    100,
+                  ],
+                },
+                discountGte,
+              ],
+            },
+          ],
+        },
+      });
+    }
+
+    // Compatibility text filter: model OR brand OR device family terms
+    if (compatModel) {
+      const compatRegex = new RegExp(escapeRegex(compatModel), "i");
+      andClauses.push({
+        $or: [
+          { "compatibility.models.model": { $regex: compatRegex } },
+          { "compatibility.models.brand": { $regex: compatRegex } },
+          { "compatibility.replacementHeadCompatibleWith": { $regex: compatRegex } },
+          { "identity.model": { $regex: compatRegex } },
+          { "identity.productLine": { $regex: compatRegex } },
+          { tags: { $regex: compatRegex } },
+        ],
+      });
+    }
+
+    if (andClauses.length) {
+      filter.$and = [...(filter.$and || []), ...andClauses];
     }
 
     // Sort
@@ -512,6 +594,8 @@ const RANKING_LITERALS = [
   "top-rated",
   "featured",
   "new-arrivals",
+  "brands",
+  "compatibility-options",
 ];
 
 router.get("/:slugOrId", async (req, res, next) => {
@@ -574,6 +658,88 @@ router.get("/brands", async (req, res) => {
 
     setCacheHeaders(res, { sMaxAge: 300, staleWhileRevalidate: 600 });
     return sendOk(res, sorted);
+  } catch (e) {
+    return jsonErr(res, e);
+  }
+});
+
+/* ============================================================================
+   COMPATIBILITY AUTOCOMPLETE
+   GET /api/products/compatibility-options?q&limit
+============================================================================ */
+
+router.get("/compatibility-options", async (req, res) => {
+  try {
+    const q = sanitizeSearchQuery(req.query.q, 80).toLowerCase();
+    const limit = Math.min(Math.max(Number(req.query.limit || 40), 1), 100);
+    const baseFilter = {
+      isActive: true,
+      isDeleted: { $ne: true },
+    };
+
+    const [brandsRaw, modelsRaw, identityModelsRaw, productLinesRaw, legacyRaw] =
+      await Promise.all([
+        Product.distinct("compatibility.models.brand", baseFilter),
+        Product.distinct("compatibility.models.model", baseFilter),
+        Product.distinct("identity.model", baseFilter),
+        Product.distinct("identity.productLine", baseFilter),
+        Product.distinct(
+          "compatibility.replacementHeadCompatibleWith",
+          baseFilter,
+        ),
+      ]);
+
+    const normalizeValues = (arr) =>
+      (arr || [])
+        .map((value) => String(value || "").trim())
+        .filter(Boolean);
+
+    const brands = normalizeValues(brandsRaw);
+    const models = normalizeValues(modelsRaw);
+    const devices = normalizeValues([
+      ...identityModelsRaw,
+      ...productLinesRaw,
+      ...legacyRaw,
+    ]);
+
+    const byKey = new Map();
+    const pushOptions = (values, type) => {
+      for (const value of values) {
+        const label = value;
+        const search = label.toLowerCase();
+        if (q && !search.includes(q)) continue;
+        const key = `${type}:${search}`;
+        if (byKey.has(key)) continue;
+        byKey.set(key, { type, value, label, search });
+      }
+    };
+
+    pushOptions(brands, "brand");
+    pushOptions(models, "model");
+    pushOptions(devices, "device");
+
+    const score = (search) => {
+      if (!q) return 0;
+      if (search === q) return 0;
+      if (search.startsWith(q)) return 1;
+      return 2;
+    };
+
+    const options = [...byKey.values()]
+      .sort(
+        (a, b) =>
+          score(a.search) - score(b.search) ||
+          a.label.localeCompare(b.label, undefined, { sensitivity: "base" }),
+      )
+      .slice(0, limit)
+      .map(({ type, value, label }) => ({ type, value, label }));
+
+    setCacheHeaders(res, {
+      sMaxAge: 120,
+      staleWhileRevalidate: 300,
+      vary: "Accept-Language",
+    });
+    return sendOk(res, options);
   } catch (e) {
     return jsonErr(res, e);
   }

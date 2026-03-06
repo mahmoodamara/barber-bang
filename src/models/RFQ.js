@@ -2,7 +2,11 @@ import mongoose from "mongoose";
 
 const rfqItemSchema = new mongoose.Schema(
   {
-    productId: { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: true },
+    productId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Product",
+      required: true,
+    },
     productTitle: { type: String, default: "" },
     qty: { type: Number, required: true, min: 1 },
     note: { type: String, maxlength: 500, default: "" },
@@ -12,16 +16,32 @@ const rfqItemSchema = new mongoose.Schema(
 
 const rfqSchema = new mongoose.Schema(
   {
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
     rfqNumber: { type: String, unique: true, sparse: true },
 
     status: {
       type: String,
-      enum: ["submitted", "reviewing", "quoted", "accepted", "rejected", "expired", "converted"],
+      enum: [
+        "submitted",
+        "reviewing",
+        "quoted",
+        "accepted",
+        "rejected",
+        "expired",
+        "converted",
+      ],
       default: "submitted",
     },
 
-    items: { type: [rfqItemSchema], required: true, validate: [(v) => v.length > 0, "At least one item required"] },
+    items: {
+      type: [rfqItemSchema],
+      required: true,
+      validate: [(v) => v.length > 0, "At least one item required"],
+    },
 
     customerNote: { type: String, maxlength: 2000, default: "" },
     adminNote: { type: String, maxlength: 2000, default: "" },
@@ -36,9 +56,17 @@ const rfqSchema = new mongoose.Schema(
       },
     ],
     quotedAt: { type: Date, default: null },
-    quotedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+    quotedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
 
-    convertedOrderId: { type: mongoose.Schema.Types.ObjectId, ref: "Order", default: null },
+    convertedOrderId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Order",
+      default: null,
+    },
 
     expiresAt: { type: Date, default: null },
   },

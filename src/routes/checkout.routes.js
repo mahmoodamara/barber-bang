@@ -35,7 +35,12 @@ import {
   releaseStockReservation,
   releaseExpiredReservations,
 } from "../services/products.service.js";
-import { sendOrderConfirmationSafe } from "../services/email.service.js";
+import {
+  sendOrderConfirmationSafe,
+  sendCheckoutOTP,
+  sendAdminOrderNotification,
+} from "../services/email.service.js";
+import { cacheGet, cacheSet, cacheDelete } from "../utils/cache.js";
 import { getRequestId } from "../middleware/error.js";
 import { getCheckoutFailureCounter } from "../middleware/prometheus.js";
 import { onCheckoutFailure } from "../utils/alertHooks.js";
@@ -60,8 +65,8 @@ router.use((req, res, next) => {
 const addressSchema = z.object({
   fullName: z.string().min(2).max(80),
   phone: z.string().min(7).max(30),
-  city: z.string().min(2).max(60),
-  street: z.string().min(2).max(120),
+  city: z.string().max(60).optional(),
+  street: z.string().max(120).optional(),
   // Extended address fields (optional) - Issue #3 fix
   building: z.string().max(120).optional(),
   floor: z.string().max(120).optional(),
@@ -77,17 +82,18 @@ const guestContactSchema = z.object({
   email: z.string().email().max(160),
 });
 
-const baseCheckoutBodySchema = z
-  .object({
-    shippingMode: z.enum(["DELIVERY", "PICKUP_POINT", "STORE_PICKUP"]),
-    deliveryAreaId: z.string().min(1).optional(),
-    pickupPointId: z.string().min(1).optional(),
-    address: addressSchema.optional(),
-    couponCode: z.string().max(40).optional(),
-    guestContact: guestContactSchema.optional(),
-    poNumber: z.string().max(100).optional(),
-  })
-  .superRefine((b, ctx) => {
+const baseCheckoutBodyObject = z.object({
+  shippingMode: z.enum(["DELIVERY", "PICKUP_POINT", "STORE_PICKUP"]),
+  deliveryAreaId: z.string().min(1).optional(),
+  pickupPointId: z.string().min(1).optional(),
+  address: addressSchema.optional(),
+  couponCode: z.string().max(40).optional(),
+  guestContact: guestContactSchema.optional(),
+  poNumber: z.string().max(100).optional(),
+});
+
+function applyCheckoutRefinements(schema) {
+  return schema.superRefine((b, ctx) => {
     if (b.shippingMode === "DELIVERY") {
       if (!b.deliveryAreaId) {
         ctx.addIssue({
@@ -102,6 +108,21 @@ const baseCheckoutBodySchema = z
           path: ["address"],
           message: "address is required for DELIVERY",
         });
+      } else {
+        if (String(b.address.city || "").trim().length < 2) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["address", "city"],
+            message: "city is required for DELIVERY",
+          });
+        }
+        if (String(b.address.street || "").trim().length < 2) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["address", "street"],
+            message: "street is required for DELIVERY",
+          });
+        }
       }
       return;
     }
@@ -119,6 +140,9 @@ const baseCheckoutBodySchema = z
 
     // STORE_PICKUP: no additional requirements
   });
+}
+
+const baseCheckoutBodySchema = applyCheckoutRefinements(baseCheckoutBodyObject);
 
 const quoteSchema = z.object({
   body: baseCheckoutBodySchema,
@@ -182,6 +206,67 @@ function getCouponReservationExpiry() {
   const ttl = Number(process.env.COUPON_RESERVATION_TTL_MINUTES || 15);
   const minutes = Number.isFinite(ttl) && ttl > 0 ? ttl : 15;
   return new Date(Date.now() + minutes * 60 * 1000);
+}
+
+/** Generate a 6-digit numeric OTP string */
+function generateOTP() {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+const OTP_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const OTP_SEND_LIMIT = 3;
+const OTP_RATE_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+
+function hasMinLen(value, min = 1) {
+  return String(value || "").trim().length >= min;
+}
+
+function assertCheckoutContactRequirements(body) {
+  const fullName = String(
+    body?.address?.fullName || body?.guestContact?.fullName || "",
+  ).trim();
+  const phone = String(
+    body?.address?.phone || body?.guestContact?.phone || "",
+  ).trim();
+
+  if (fullName.length < 2) {
+    throw makeErr(400, "FULL_NAME_REQUIRED", "Full name is required.");
+  }
+  if (phone.length < 7) {
+    throw makeErr(400, "PHONE_REQUIRED", "Phone number is required.");
+  }
+
+  if (body?.shippingMode === "DELIVERY") {
+    const address = body?.address || {};
+    if (!hasMinLen(address.city, 2)) {
+      throw makeErr(
+        400,
+        "DELIVERY_CITY_REQUIRED",
+        "City is required for delivery.",
+      );
+    }
+    if (!hasMinLen(address.street, 2)) {
+      throw makeErr(
+        400,
+        "DELIVERY_STREET_REQUIRED",
+        "Street is required for delivery.",
+      );
+    }
+  }
+}
+
+async function assertCheckoutOtpRateLimit(userId) {
+  const key = `checkout-otp-rate:${String(userId || "")}`;
+  const hit = await cacheGet(key);
+  const count = Number(hit?.value || 0);
+  if (Number.isFinite(count) && count >= OTP_SEND_LIMIT) {
+    throw makeErr(
+      429,
+      "OTP_RATE_LIMITED",
+      "Too many OTP requests. Please try again in 10 minutes.",
+    );
+  }
+  await cacheSet(key, count + 1, OTP_RATE_WINDOW_MS, OTP_RATE_WINDOW_MS);
 }
 
 async function getNextOrderNumber(session = null) {
@@ -629,6 +714,7 @@ router.post("/cod", optionalAuth(), validate(quoteSchema), async (req, res) => {
 
   try {
     const b = req.validated.body;
+    assertCheckoutContactRequirements(b);
     const authUserId = req.user?._id || null;
     const checkoutUser = authUserId
       ? req.user
@@ -845,7 +931,10 @@ router.post("/cod", optionalAuth(), validate(quoteSchema), async (req, res) => {
 
     // B2B tier progression evaluation (best-effort)
     if (order.isB2B && authUserId) {
-      evaluateTierProgression(authUserId, Number(order.pricing?.total || 0)).catch(() => {});
+      evaluateTierProgression(
+        authUserId,
+        Number(order.pricing?.total || 0),
+      ).catch(() => {});
     }
 
     return res.status(201).json({ ok: true, data: order });
@@ -877,204 +966,655 @@ router.post("/cod", optionalAuth(), validate(quoteSchema), async (req, res) => {
  * POST /api/checkout/bank-transfer
  * B2B only — creates order with pending_payment status, awaiting bank transfer confirmation.
  */
-router.post("/bank-transfer", requireAuth(), validate(quoteSchema), async (req, res) => {
-  try {
-    const b = req.validated?.body ?? req.body;
-    const userId = req.user._id;
+router.post(
+  "/bank-transfer",
+  requireAuth(),
+  validate(quoteSchema),
+  async (req, res) => {
+    try {
+      const b = req.validated?.body ?? req.body;
+      assertCheckoutContactRequirements(b);
+      const userId = req.user._id;
 
-    const user = await User.findById(userId).select("b2bApproved wholesaleTier taxId businessName").lean();
-    if (!user?.b2bApproved) {
-      return jsonErr(res, makeErr(403, "NOT_B2B", "Bank transfer is only available for B2B accounts"));
-    }
+      const user = await User.findById(userId)
+        .select("b2bApproved wholesaleTier taxId businessName")
+        .lean();
 
-    const cartItems = await getCartItemsOrThrow(userId);
+      const cartItems = await getCartItemsOrThrow(userId);
 
-    const shipping = await attachShippingSnapshots(toShippingInput(b));
+      const shipping = await attachShippingSnapshots(toShippingInput(b));
 
-    const quote = await quotePricing({
-      cartItems,
-      shipping,
-      couponCode: b.couponCode || null,
-      userId,
-    });
-
-    const orderItems = mapOrderItemsFromQuote(quote);
-    const giftItems = mapGiftItemsFromQuote(quote);
-    const discountTotal = calcDiscountTotal(quote);
-    const couponAppliedCode = String(quote?.discounts?.coupon?.code || "");
-
-    const orderId = new mongoose.Types.ObjectId();
-    const orderNumber = await getNextOrderNumber(null);
-
-    const created = await Order.create([
-      {
-        _id: orderId,
-        userId,
-        orderNumber,
-        items: orderItems,
-        gifts: giftItems,
-        status: "pending_payment",
-        paymentMethod: "bank_transfer",
-        poNumber: b.poNumber || "",
-        isB2B: true,
-        pricing: {
-          subtotal: Number(quote.subtotal || 0),
-          shippingFee: Number(quote.shippingFee || 0),
-          discounts: quote.discounts || { coupon: { code: null, amount: 0 }, campaign: { amount: 0 }, offer: { amount: 0 } },
-          total: Number(quote.total || 0),
-          vatRate: Number(quote.vatRate || 0),
-          vatIncludedInPrices: Boolean(quote.vatIncludedInPrices || false),
-          vatAmount: Number(quote.vatAmount || 0),
-          totalBeforeVat: Number(quote.totalBeforeVat || 0),
-          totalAfterVat: Number(quote.totalAfterVat || 0),
-          discountTotal: Number(discountTotal || 0),
-          couponCode: couponAppliedCode,
-          subtotalMinor: Number(quote.subtotalMinor || 0),
-          shippingFeeMinor: Number(quote.shippingFeeMinor || 0),
-          discountTotalMinor: Number(toMinorUnits(discountTotal || 0)),
-          totalMinor: Number(quote.totalMinor || 0),
-          vatAmountMinor: Number(quote.vatAmountMinor || 0),
-          totalBeforeVatMinor: Number(quote.totalBeforeVatMinor || 0),
-          totalAfterVatMinor: Number(quote.totalAfterVatMinor || 0),
-        },
-        pricingMinor: {
-          subtotal: toMinorUnits(quote.subtotal || 0),
-          shippingFee: toMinorUnits(quote.shippingFee || 0),
-          vatAmount: toMinorUnits(quote.vatAmount || 0),
-          totalBeforeVat: toMinorUnits(quote.totalBeforeVat || 0),
-          totalAfterVat: toMinorUnits(quote.totalAfterVat || 0),
-          total: toMinorUnits(quote.total || 0),
-        },
+      const quote = await quotePricing({
+        cartItems,
         shipping,
-        invoice: {
-          customerVatId: String(user.taxId || ""),
-          customerCompanyName: String(user.businessName || ""),
+        couponCode: b.couponCode || null,
+        userId,
+      });
+
+      const orderItems = mapOrderItemsFromQuote(quote);
+      const giftItems = mapGiftItemsFromQuote(quote);
+      const discountTotal = calcDiscountTotal(quote);
+      const couponAppliedCode = String(quote?.discounts?.coupon?.code || "");
+
+      const orderId = new mongoose.Types.ObjectId();
+      const orderNumber = await getNextOrderNumber(null);
+
+      const created = await Order.create([
+        {
+          _id: orderId,
+          userId,
+          orderNumber,
+          items: orderItems,
+          gifts: giftItems,
+          status: "pending_payment",
+          paymentMethod: "bank_transfer",
+          poNumber: b.poNumber || "",
+          isB2B: Boolean(user?.b2bApproved),
+          pricing: {
+            subtotal: Number(quote.subtotal || 0),
+            shippingFee: Number(quote.shippingFee || 0),
+            discounts: quote.discounts || {
+              coupon: { code: null, amount: 0 },
+              campaign: { amount: 0 },
+              offer: { amount: 0 },
+            },
+            total: Number(quote.total || 0),
+            vatRate: Number(quote.vatRate || 0),
+            vatIncludedInPrices: Boolean(quote.vatIncludedInPrices || false),
+            vatAmount: Number(quote.vatAmount || 0),
+            totalBeforeVat: Number(quote.totalBeforeVat || 0),
+            totalAfterVat: Number(quote.totalAfterVat || 0),
+            discountTotal: Number(discountTotal || 0),
+            couponCode: couponAppliedCode,
+            subtotalMinor: Number(quote.subtotalMinor || 0),
+            shippingFeeMinor: Number(quote.shippingFeeMinor || 0),
+            discountTotalMinor: Number(toMinorUnits(discountTotal || 0)),
+            totalMinor: Number(quote.totalMinor || 0),
+            vatAmountMinor: Number(quote.vatAmountMinor || 0),
+            totalBeforeVatMinor: Number(quote.totalBeforeVatMinor || 0),
+            totalAfterVatMinor: Number(quote.totalAfterVatMinor || 0),
+          },
+          pricingMinor: {
+            subtotal: toMinorUnits(quote.subtotal || 0),
+            shippingFee: toMinorUnits(quote.shippingFee || 0),
+            vatAmount: toMinorUnits(quote.vatAmount || 0),
+            totalBeforeVat: toMinorUnits(quote.totalBeforeVat || 0),
+            totalAfterVat: toMinorUnits(quote.totalAfterVat || 0),
+            total: toMinorUnits(quote.total || 0),
+          },
+          shipping,
+          invoice: {
+            customerVatId: String(user?.taxId || ""),
+            customerCompanyName: String(user?.businessName || ""),
+          },
         },
-      },
-    ]);
+      ]);
 
-    const order = created?.[0] || created;
+      const order = created?.[0] || created;
 
-    await clearPurchasedItemsFromCart(userId, orderItems, null);
-    sendOrderConfirmationSafe(order._id).catch(() => {});
+      await clearPurchasedItemsFromCart(userId, orderItems, null);
+      sendOrderConfirmationSafe(order._id).catch(() => {});
 
-    // B2B tier progression evaluation (best-effort)
-    evaluateTierProgression(userId, Number(quote.total || 0)).catch(() => {});
+      // B2B tier progression evaluation (best-effort)
+      if (user?.b2bApproved) {
+        evaluateTierProgression(userId, Number(quote.total || 0)).catch(() => {});
+      }
 
-    return res.status(201).json({ ok: true, data: order });
-  } catch (e) {
-    return jsonErr(res, e);
-  }
-});
+      return res.status(201).json({ ok: true, data: order });
+    } catch (e) {
+      return jsonErr(res, e);
+    }
+  },
+);
 
 /**
  * POST /api/checkout/net-terms
  * B2B only — creates order on credit (Net 30/60/etc). Requires credit limit.
  */
-router.post("/net-terms", requireAuth(), validate(quoteSchema), async (req, res) => {
+router.post(
+  "/net-terms",
+  requireAuth(),
+  validate(quoteSchema),
+  async (req, res) => {
+    try {
+      const b = req.validated?.body ?? req.body;
+      assertCheckoutContactRequirements(b);
+      const userId = req.user._id;
+
+      const user = await User.findById(userId)
+        .select(
+          "b2bApproved wholesaleTier taxId businessName creditLimit creditTermDays creditBalance",
+        )
+        .lean();
+      if (!user?.b2bApproved) {
+        return jsonErr(
+          res,
+          makeErr(403, "NOT_B2B", "B2B account required for net terms"),
+        );
+      }
+      if (!user.creditLimit || user.creditLimit <= 0) {
+        return jsonErr(
+          res,
+          makeErr(
+            400,
+            "NO_CREDIT",
+            "No credit limit configured. Contact admin.",
+          ),
+        );
+      }
+
+      const cartItems = await getCartItemsOrThrow(userId);
+      const shipping = await attachShippingSnapshots(toShippingInput(b));
+
+      const quote = await quotePricing({
+        cartItems,
+        shipping,
+        couponCode: b.couponCode || null,
+        userId,
+      });
+
+      const orderTotal = Number(quote.total || 0);
+      const newBalance = (user.creditBalance || 0) + orderTotal;
+      if (newBalance > user.creditLimit) {
+        return jsonErr(
+          res,
+          makeErr(
+            400,
+            "CREDIT_EXCEEDED",
+            `Order exceeds credit limit. Available: ₪${(user.creditLimit - (user.creditBalance || 0)).toFixed(2)}`,
+          ),
+        );
+      }
+
+      const orderItems = mapOrderItemsFromQuote(quote);
+      const giftItems = mapGiftItemsFromQuote(quote);
+      const discountTotal = calcDiscountTotal(quote);
+      const couponAppliedCode = String(quote?.discounts?.coupon?.code || "");
+      const termDays = user.creditTermDays || 30;
+
+      const orderId = new mongoose.Types.ObjectId();
+      const orderNumber = await getNextOrderNumber(null);
+
+      const created = await Order.create([
+        {
+          _id: orderId,
+          userId,
+          orderNumber,
+          items: orderItems,
+          gifts: giftItems,
+          status: "confirmed",
+          paymentMethod: "net_terms",
+          paymentDueAt: new Date(Date.now() + termDays * 24 * 60 * 60 * 1000),
+          poNumber: b.poNumber || "",
+          isB2B: true,
+          pricing: {
+            subtotal: Number(quote.subtotal || 0),
+            shippingFee: Number(quote.shippingFee || 0),
+            discounts: quote.discounts || {
+              coupon: { code: null, amount: 0 },
+              campaign: { amount: 0 },
+              offer: { amount: 0 },
+            },
+            total: orderTotal,
+            vatRate: Number(quote.vatRate || 0),
+            vatIncludedInPrices: Boolean(quote.vatIncludedInPrices || false),
+            vatAmount: Number(quote.vatAmount || 0),
+            totalBeforeVat: Number(quote.totalBeforeVat || 0),
+            totalAfterVat: Number(quote.totalAfterVat || 0),
+            discountTotal: Number(discountTotal || 0),
+            couponCode: couponAppliedCode,
+            subtotalMinor: Number(quote.subtotalMinor || 0),
+            shippingFeeMinor: Number(quote.shippingFeeMinor || 0),
+            discountTotalMinor: Number(toMinorUnits(discountTotal || 0)),
+            totalMinor: Number(quote.totalMinor || 0),
+            vatAmountMinor: Number(quote.vatAmountMinor || 0),
+            totalBeforeVatMinor: Number(quote.totalBeforeVatMinor || 0),
+            totalAfterVatMinor: Number(quote.totalAfterVatMinor || 0),
+          },
+          pricingMinor: {
+            subtotal: toMinorUnits(quote.subtotal || 0),
+            shippingFee: toMinorUnits(quote.shippingFee || 0),
+            vatAmount: toMinorUnits(quote.vatAmount || 0),
+            totalBeforeVat: toMinorUnits(quote.totalBeforeVat || 0),
+            totalAfterVat: toMinorUnits(quote.totalAfterVat || 0),
+            total: toMinorUnits(quote.total || 0),
+          },
+          shipping,
+          invoice: {
+            customerVatId: String(user.taxId || ""),
+            customerCompanyName: String(user.businessName || ""),
+          },
+        },
+      ]);
+
+      // Update credit balance
+      await User.updateOne(
+        { _id: userId },
+        { $inc: { creditBalance: orderTotal } },
+      );
+
+      const order = created?.[0] || created;
+      await clearPurchasedItemsFromCart(userId, orderItems, null);
+      sendOrderConfirmationSafe(order._id).catch(() => {});
+
+      // B2B tier progression evaluation (best-effort)
+      evaluateTierProgression(userId, orderTotal).catch(() => {});
+
+      return res.status(201).json({ ok: true, data: order });
+    } catch (e) {
+      return jsonErr(res, e);
+    }
+  },
+);
+
+/**
+ * POST /api/checkout/send-otp
+ * Validates the checkout payload, generates a 6-digit OTP, stores it in cache,
+ * and sends it to the authenticated user's email.
+ * Must be called before /verify-and-create.
+ */
+router.post("/send-otp", requireAuth(), validate(quoteSchema), async (req, res) => {
   try {
-    const b = req.validated?.body ?? req.body;
-    const userId = req.user._id;
+    const b = req.validated.body;
+    assertCheckoutContactRequirements(b);
 
-    const user = await User.findById(userId).select("b2bApproved wholesaleTier taxId businessName creditLimit creditTermDays creditBalance").lean();
-    if (!user?.b2bApproved) {
-      return jsonErr(res, makeErr(403, "NOT_B2B", "B2B account required for net terms"));
+    const userId = String(req.user._id);
+    const user = req.user;
+
+    const to = String(user?.email || "").trim().toLowerCase();
+    if (!to) {
+      return jsonErr(res, makeErr(400, "NO_EMAIL", "User has no email address"));
     }
-    if (!user.creditLimit || user.creditLimit <= 0) {
-      return jsonErr(res, makeErr(400, "NO_CREDIT", "No credit limit configured. Contact admin."));
-    }
 
-    const cartItems = await getCartItemsOrThrow(userId);
-    const shipping = await attachShippingSnapshots(toShippingInput(b));
+    await assertCheckoutOtpRateLimit(userId);
 
-    const quote = await quotePricing({
-      cartItems,
-      shipping,
-      couponCode: b.couponCode || null,
-      userId,
+    const otp = generateOTP();
+    await cacheSet(`checkout-otp:${userId}`, otp, OTP_TTL_MS, OTP_TTL_MS);
+
+    const lang = String(req.headers["accept-language"] || req.query.lang || "he")
+      .split(",")[0]
+      .trim()
+      .slice(0, 2);
+
+    const name = String(user?.name || "").trim();
+
+    sendCheckoutOTP(to, name, otp, lang).catch((e) => {
+      req.log?.warn({ err: String(e?.message || e) }, "[checkout.send-otp] OTP email failed");
     });
 
-    const orderTotal = Number(quote.total || 0);
-    const newBalance = (user.creditBalance || 0) + orderTotal;
-    if (newBalance > user.creditLimit) {
-      return jsonErr(res, makeErr(400, "CREDIT_EXCEEDED", `Order exceeds credit limit. Available: ₪${(user.creditLimit - (user.creditBalance || 0)).toFixed(2)}`));
-    }
-
-    const orderItems = mapOrderItemsFromQuote(quote);
-    const giftItems = mapGiftItemsFromQuote(quote);
-    const discountTotal = calcDiscountTotal(quote);
-    const couponAppliedCode = String(quote?.discounts?.coupon?.code || "");
-    const termDays = user.creditTermDays || 30;
-
-    const orderId = new mongoose.Types.ObjectId();
-    const orderNumber = await getNextOrderNumber(null);
-
-    const created = await Order.create([
-      {
-        _id: orderId,
-        userId,
-        orderNumber,
-        items: orderItems,
-        gifts: giftItems,
-        status: "confirmed",
-        paymentMethod: "net_terms",
-        paymentDueAt: new Date(Date.now() + termDays * 24 * 60 * 60 * 1000),
-        poNumber: b.poNumber || "",
-        isB2B: true,
-        pricing: {
-          subtotal: Number(quote.subtotal || 0),
-          shippingFee: Number(quote.shippingFee || 0),
-          discounts: quote.discounts || { coupon: { code: null, amount: 0 }, campaign: { amount: 0 }, offer: { amount: 0 } },
-          total: orderTotal,
-          vatRate: Number(quote.vatRate || 0),
-          vatIncludedInPrices: Boolean(quote.vatIncludedInPrices || false),
-          vatAmount: Number(quote.vatAmount || 0),
-          totalBeforeVat: Number(quote.totalBeforeVat || 0),
-          totalAfterVat: Number(quote.totalAfterVat || 0),
-          discountTotal: Number(discountTotal || 0),
-          couponCode: couponAppliedCode,
-          subtotalMinor: Number(quote.subtotalMinor || 0),
-          shippingFeeMinor: Number(quote.shippingFeeMinor || 0),
-          discountTotalMinor: Number(toMinorUnits(discountTotal || 0)),
-          totalMinor: Number(quote.totalMinor || 0),
-          vatAmountMinor: Number(quote.vatAmountMinor || 0),
-          totalBeforeVatMinor: Number(quote.totalBeforeVatMinor || 0),
-          totalAfterVatMinor: Number(quote.totalAfterVatMinor || 0),
-        },
-        pricingMinor: {
-          subtotal: toMinorUnits(quote.subtotal || 0),
-          shippingFee: toMinorUnits(quote.shippingFee || 0),
-          vatAmount: toMinorUnits(quote.vatAmount || 0),
-          totalBeforeVat: toMinorUnits(quote.totalBeforeVat || 0),
-          totalAfterVat: toMinorUnits(quote.totalAfterVat || 0),
-          total: toMinorUnits(quote.total || 0),
-        },
-        shipping,
-        invoice: {
-          customerVatId: String(user.taxId || ""),
-          customerCompanyName: String(user.businessName || ""),
-        },
-      },
-    ]);
-
-    // Update credit balance
-    await User.updateOne({ _id: userId }, { $inc: { creditBalance: orderTotal } });
-
-    const order = created?.[0] || created;
-    await clearPurchasedItemsFromCart(userId, orderItems, null);
-    sendOrderConfirmationSafe(order._id).catch(() => {});
-
-    // B2B tier progression evaluation (best-effort)
-    evaluateTierProgression(userId, orderTotal).catch(() => {});
-
-    return res.status(201).json({ ok: true, data: order });
+    return res.json({ ok: true, success: true });
   } catch (e) {
     return jsonErr(res, e);
   }
 });
 
 /**
+ * POST /api/checkout/verify-and-create
+ * Validates the OTP then creates an order (COD or bank transfer).
+ * Body: { otpCode, paymentMethod?, ...checkoutPayload }
+ * After success: sends order confirmation email to customer + admin notification.
+ */
+router.post(
+  "/verify-and-create",
+  requireAuth(),
+  validate(
+    z.object({
+      body: applyCheckoutRefinements(
+        baseCheckoutBodyObject.extend({
+          otpCode: z.string().regex(/^\d{6}$/),
+          paymentMethod: z.enum(["cod", "bank_transfer"]).optional().default("cod"),
+        }),
+      ),
+    }),
+  ),
+  async (req, res) => {
+    let reserved = false;
+    let orderId = null;
+    let orderCreated = false;
+    let fallbackUsed = false;
+
+    try {
+      const b = req.validated.body;
+      assertCheckoutContactRequirements(b);
+      const userId = req.user._id;
+      const userIdStr = String(userId);
+      const paymentMethod = b.paymentMethod || "cod";
+      const lang = String(req.headers["accept-language"] || req.query.lang || "he")
+        .split(",")[0]
+        .trim()
+        .slice(0, 2);
+
+      // ── OTP validation ──────────────────────────────────────────────
+      const cached = await cacheGet(`checkout-otp:${userIdStr}`);
+      if (!cached || cached.stale) {
+        return jsonErr(res, makeErr(400, "OTP_EXPIRED", "OTP expired. Please request a new code."));
+      }
+      if (cached.value !== b.otpCode) {
+        return jsonErr(res, makeErr(400, "OTP_INVALID", "Invalid OTP code."));
+      }
+      // Consume OTP (single-use)
+      await cacheDelete(`checkout-otp:${userIdStr}`);
+      if (paymentMethod === "bank_transfer") {
+        const idemKey = pickIdempotencyKey(req);
+        const existing = await findExistingCheckoutOrder({
+          userId,
+          idemKey,
+          paymentMethod: "bank_transfer",
+        });
+        if (existing) return res.status(200).json({ ok: true, data: existing });
+
+        const user = await User.findById(userId)
+          .select("b2bApproved wholesaleTier taxId businessName")
+          .lean();
+
+        const cartItems = await getCartItemsOrThrow(userId);
+        const shipping = await attachShippingSnapshots(toShippingInput(b));
+        const quote = await quotePricing({
+          cartItems,
+          shipping,
+          couponCode: b.couponCode || null,
+          userId,
+        });
+
+        const criticalGiftWarnings = (quote.meta?.giftWarnings || []).filter(
+          (w) => w.type === "GIFT_OUT_OF_STOCK",
+        );
+        if (criticalGiftWarnings.length > 0) {
+          return res.status(400).json({
+            ok: false,
+            error: {
+              code: "GIFT_OUT_OF_STOCK",
+              message: "One or more gift items are out of stock",
+              details: criticalGiftWarnings,
+              requestId: getRequestId(req),
+              path: req.originalUrl || req.url || "",
+            },
+          });
+        }
+
+        const orderItems = mapOrderItemsFromQuote(quote);
+        const giftItems = mapGiftItemsFromQuote(quote);
+        const discountTotal = calcDiscountTotal(quote);
+        const couponAppliedCode = String(quote?.discounts?.coupon?.code || "");
+
+        const created = await Order.create([
+          {
+            _id: new mongoose.Types.ObjectId(),
+            userId,
+            orderNumber: await getNextOrderNumber(null),
+            items: orderItems,
+            gifts: giftItems,
+            status: "pending_payment",
+            paymentMethod: "bank_transfer",
+            poNumber: b.poNumber || "",
+            isB2B: Boolean(user?.b2bApproved),
+            idempotency: { checkoutKey: idemKey || "" },
+            pricing: {
+              subtotal: Number(quote.subtotal || 0),
+              shippingFee: Number(quote.shippingFee || 0),
+              discounts: quote.discounts || {
+                coupon: { code: null, amount: 0 },
+                campaign: { amount: 0 },
+                offer: { amount: 0 },
+              },
+              total: Number(quote.total || 0),
+              vatRate: Number(quote.vatRate || 0),
+              vatIncludedInPrices: Boolean(quote.vatIncludedInPrices || false),
+              vatAmount: Number(quote.vatAmount || 0),
+              totalBeforeVat: Number(quote.totalBeforeVat || 0),
+              totalAfterVat: Number(quote.totalAfterVat || 0),
+              discountTotal: Number(discountTotal || 0),
+              couponCode: couponAppliedCode,
+              subtotalMinor: Number(quote.subtotalMinor || 0),
+              shippingFeeMinor: Number(quote.shippingFeeMinor || 0),
+              discountTotalMinor: Number(toMinorUnits(discountTotal || 0)),
+              totalMinor: Number(quote.totalMinor || 0),
+              vatAmountMinor: Number(quote.vatAmountMinor || 0),
+              totalBeforeVatMinor: Number(quote.totalBeforeVatMinor || 0),
+              totalAfterVatMinor: Number(quote.totalAfterVatMinor || 0),
+            },
+            pricingMinor: {
+              subtotal: toMinorUnits(quote.subtotal || 0),
+              shippingFee: toMinorUnits(quote.shippingFee || 0),
+              vatAmount: toMinorUnits(quote.vatAmount || 0),
+              totalBeforeVat: toMinorUnits(quote.totalBeforeVat || 0),
+              totalAfterVat: toMinorUnits(quote.totalAfterVat || 0),
+              total: toMinorUnits(quote.total || 0),
+            },
+            shipping,
+            invoice: {
+              customerVatId: String(user?.taxId || ""),
+              customerCompanyName: String(user?.businessName || ""),
+            },
+          },
+        ]);
+
+        const order = created?.[0] || created;
+        await clearPurchasedItemsFromCart(userId, orderItems, null);
+
+        sendOrderConfirmationSafe(order._id, { lang }).catch((e) => {
+          req.log?.warn(
+            { err: String(e?.message || e), orderId: order._id },
+            "[checkout.verify-and-create] confirmation email failed",
+          );
+        });
+
+        sendAdminOrderNotification(order, lang).catch((e) => {
+          req.log?.warn(
+            { err: String(e?.message || e), orderId: order._id },
+            "[checkout.verify-and-create] admin notification failed",
+          );
+        });
+
+        if (user?.b2bApproved) {
+          evaluateTierProgression(userId, Number(order.pricing?.total || 0)).catch(() => {});
+        }
+
+        return res.status(201).json({ ok: true, data: order });
+      }
+
+      // ── Order creation (same as /cod for authenticated users) ────────
+      const idemKey = pickIdempotencyKey(req);
+
+      const existing = await findExistingCheckoutOrder({
+        userId,
+        idemKey,
+        paymentMethod: "cod",
+      });
+      if (existing) return res.status(200).json({ ok: true, data: existing });
+
+      const cartItems = await getCartItemsOrThrow(userId);
+      const shipping = await attachShippingSnapshots(toShippingInput(b));
+
+      const quote = await quotePricing({
+        cartItems,
+        shipping,
+        couponCode: b.couponCode,
+        userId,
+      });
+
+      const criticalGiftWarnings = (quote.meta?.giftWarnings || []).filter(
+        (w) => w.type === "GIFT_OUT_OF_STOCK",
+      );
+      if (criticalGiftWarnings.length > 0) {
+        return res.status(400).json({
+          ok: false,
+          error: {
+            code: "GIFT_OUT_OF_STOCK",
+            message: "One or more gift items are out of stock",
+            details: criticalGiftWarnings,
+            requestId: getRequestId(req),
+            path: req.originalUrl || req.url || "",
+          },
+        });
+      }
+
+      await releaseExpiredReservations().catch((e) => {
+        req.log?.warn({ err: String(e?.message || e) }, "[best-effort] release expired reservations failed");
+      });
+
+      const discountTotal = calcDiscountTotal(quote);
+      const couponAppliedCode = String(quote?.discounts?.coupon?.code || "");
+
+      const orderItems = mapOrderItemsFromQuote(quote);
+      const giftItems = mapGiftItemsFromQuote(quote);
+      const reservationItems = buildReservationItems(quote.items, quote.gifts);
+
+      const order = await withMongoTransaction(async (session) => {
+        reserved = false;
+        orderCreated = false;
+        orderId = null;
+        fallbackUsed = session === null;
+
+        orderId = new mongoose.Types.ObjectId();
+        const orderNumber = await getNextOrderNumber(session);
+
+        await reserveStockForOrder({
+          orderId,
+          userId,
+          items: reservationItems,
+          ttlMinutes: 15,
+          session,
+        });
+        reserved = true;
+
+        const created = await Order.create(
+          [
+            {
+              _id: orderId,
+              userId,
+              orderNumber,
+              items: orderItems,
+              gifts: giftItems,
+              status: "pending_cod",
+              paymentMethod: "cod",
+              pricing: {
+                subtotal: Number(quote.subtotal || 0),
+                shippingFee: Number(quote.shippingFee || 0),
+                discounts: quote.discounts || {
+                  coupon: { code: null, amount: 0 },
+                  campaign: { amount: 0 },
+                  offer: { amount: 0 },
+                },
+                total: Number(quote.total || 0),
+                vatRate: Number(quote.vatRate || 0),
+                vatIncludedInPrices: Boolean(quote.vatIncludedInPrices || false),
+                vatAmount: Number(quote.vatAmount || 0),
+                totalBeforeVat: Number(quote.totalBeforeVat || 0),
+                totalAfterVat: Number(quote.totalAfterVat || 0),
+                discountTotal: Number(discountTotal || 0),
+                couponCode: couponAppliedCode,
+                campaignId: quote?.meta?.campaignId || null,
+                subtotalMinor: Number(quote.subtotalMinor || 0),
+                shippingFeeMinor: Number(quote.shippingFeeMinor || 0),
+                discountTotalMinor: Number(toMinorUnits(discountTotal || 0)),
+                totalMinor: Number(quote.totalMinor || 0),
+                vatAmountMinor: Number(quote.vatAmountMinor || 0),
+                totalBeforeVatMinor: Number(quote.totalBeforeVatMinor || 0),
+                totalAfterVatMinor: Number(quote.totalAfterVatMinor || 0),
+              },
+              pricingMinor: {
+                subtotal: toMinorUnits(quote.subtotal || 0),
+                shippingFee: toMinorUnits(quote.shippingFee || 0),
+                vatAmount: toMinorUnits(quote.vatAmount || 0),
+                totalBeforeVat: toMinorUnits(quote.totalBeforeVat || 0),
+                totalAfterVat: toMinorUnits(quote.totalAfterVat || 0),
+                total: toMinorUnits(quote.total || 0),
+              },
+              shipping,
+              stripe: { sessionId: "", paymentIntentId: "" },
+              poNumber: b.poNumber || "",
+              isB2B: Boolean(req.user?.b2bApproved),
+              idempotency: { checkoutKey: idemKey || "" },
+              couponReservation: couponAppliedCode
+                ? {
+                    code: couponAppliedCode,
+                    status: "consumed",
+                    reservedAt: new Date(),
+                    expiresAt: null,
+                  }
+                : undefined,
+            },
+          ],
+          session ? { session } : {},
+        );
+        orderCreated = true;
+
+        const confirmed = await confirmStockReservation({ orderId, session });
+        if (!confirmed) {
+          throw makeErr(409, "RESERVATION_INVALID", "Stock reservation expired or invalid");
+        }
+
+        if (couponAppliedCode) {
+          const couponResult = await consumeCouponAtomic({
+            code: couponAppliedCode,
+            orderId,
+            userId,
+            discountAmount: Number(quote?.discounts?.coupon?.amount || 0),
+            session,
+          });
+          if (!couponResult.success && !couponResult.alreadyUsed) {
+            throw makeErr(400, couponResult.error || "COUPON_CONSUMPTION_FAILED", "Coupon could not be applied");
+          }
+        }
+
+        await clearPurchasedItemsFromCart(userId, orderItems, session);
+
+        return created?.[0] || created;
+      });
+
+      // ── Post-order emails (fire-and-forget) ─────────────────────────
+      sendOrderConfirmationSafe(order._id, { lang }).catch((e) => {
+        req.log?.warn({ err: String(e?.message || e), orderId: order._id }, "[checkout.verify-and-create] confirmation email failed");
+      });
+
+      sendAdminOrderNotification(order, lang).catch((e) => {
+        req.log?.warn({ err: String(e?.message || e), orderId: order._id }, "[checkout.verify-and-create] admin notification failed");
+      });
+
+      if (req.user?.b2bApproved) {
+        evaluateTierProgression(userId, Number(order.pricing?.total || 0)).catch(() => {});
+      }
+
+      return res.status(201).json({ ok: true, data: order });
+    } catch (e) {
+      if (fallbackUsed && reserved && orderId) {
+        await releaseStockReservation({ orderId }).catch(() => {});
+      }
+      if (fallbackUsed && orderCreated && orderId) {
+        await Order.deleteOne({ _id: orderId }).catch(() => {});
+      }
+      return jsonErr(res, e);
+    }
+  },
+);
+
+/**
  * POST /api/checkout/stripe
+ * Disabled — card payments are currently not accepted.
+ */
+router.post("/stripe", (req, res) => {
+  return res.status(403).json({
+    ok: false,
+    error: {
+      code: "PAYMENT_METHOD_DISABLED",
+      message: "Card payments are currently disabled.",
+    },
+  });
+});
+
+router.post("/stripe-disabled", (req, res) => {
+  return res.status(403).json({
+    ok: false,
+    error: {
+      code: "PAYMENT_METHOD_DISABLED",
+      message: "Card payments are currently disabled.",
+    },
+  });
+});
+
+/**
+ * POST /api/checkout/stripe (original — kept below for reference, now unreachable)
  * ✅ MUST reuse quotePricing
  * ✅ Create pending_payment order
  * ✅ DO NOT increment coupon usedCount here (done by webhook after success)
@@ -1082,7 +1622,7 @@ router.post("/net-terms", requireAuth(), validate(quoteSchema), async (req, res)
  * ✅ Idempotency supported (returns existing order + existing session.url if possible)
  */
 router.post(
-  "/stripe",
+  "/stripe-disabled",
   optionalAuth(),
   validate(quoteSchema),
   async (req, res) => {

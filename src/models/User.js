@@ -102,6 +102,8 @@ const userSchema = new mongoose.Schema(
       default: "individual",
     },
     businessName: { type: String, default: "", trim: true, maxlength: 200 },
+    b2bPhone: { type: String, default: "", trim: true, maxlength: 30 },
+    b2bMessage: { type: String, default: "", trim: true, maxlength: 300 },
     businessId: { type: String, default: "", trim: true, maxlength: 50 },
     taxId: { type: String, default: "", trim: true, maxlength: 50 },
     wholesaleTier: {

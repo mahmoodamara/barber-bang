@@ -96,6 +96,35 @@ const productStatsSchema = new Schema(
   { _id: false },
 );
 
+const compatibilityModelSchema = new Schema(
+  {
+    brand: { type: String, required: true, trim: true, maxlength: 120 },
+    model: { type: String, required: true, trim: true, maxlength: 160 },
+    notes: { type: String, default: "", trim: true, maxlength: 500 },
+  },
+  { _id: false },
+);
+
+const compatibilitySchema = new Schema(
+  {
+    type: {
+      type: String,
+      enum: ["fits_models", "fits_devices", "universal", "not_applicable"],
+      default: "not_applicable",
+    },
+    models: { type: [compatibilityModelSchema], default: [] },
+    warnings: { type: [String], default: [] },
+    source: {
+      type: String,
+      enum: ["manufacturer", "internal"],
+      default: "internal",
+    },
+    // Legacy field kept for backward compatibility
+    replacementHeadCompatibleWith: { type: [String], default: [] },
+  },
+  { _id: false },
+);
+
 const productSchema = new Schema(
   {
     // Bilingual fields (default language: Hebrew)
@@ -258,9 +287,7 @@ const productSchema = new Schema(
     packageIncludes: { type: [String], default: [] },
     packageIncludesHe: { type: [String], default: [] },
     packageIncludesAr: { type: [String], default: [] },
-    compatibility: {
-      replacementHeadCompatibleWith: { type: [String], default: [] },
-    },
+    compatibility: { type: compatibilitySchema, default: () => ({}) },
     publishContent: {
       seoKeywords: { type: [String], default: [] },
       bulletsHe: { type: [String], default: [] },
@@ -396,6 +423,52 @@ productSchema.pre("validate", function productPreValidate(next) {
     // Ensure integers for stock (defensive)
     if (Number.isFinite(this.stock))
       this.stock = Math.max(0, Math.trunc(this.stock));
+
+    if (this.compatibility && typeof this.compatibility === "object") {
+      const type = String(this.compatibility.type || "").trim();
+      const allowedTypes = new Set([
+        "fits_models",
+        "fits_devices",
+        "universal",
+        "not_applicable",
+      ]);
+      this.compatibility.type = allowedTypes.has(type) ? type : "not_applicable";
+
+      const source = String(this.compatibility.source || "").trim();
+      this.compatibility.source =
+        source === "manufacturer" || source === "internal"
+          ? source
+          : "internal";
+
+      if (Array.isArray(this.compatibility.models)) {
+        this.compatibility.models = this.compatibility.models
+          .map((item) => ({
+            brand: String(item?.brand || "").trim(),
+            model: String(item?.model || "").trim(),
+            notes: String(item?.notes || "").trim(),
+          }))
+          .filter((item) => item.brand && item.model);
+      } else {
+        this.compatibility.models = [];
+      }
+
+      if (Array.isArray(this.compatibility.warnings)) {
+        this.compatibility.warnings = this.compatibility.warnings
+          .map((item) => String(item || "").trim())
+          .filter(Boolean);
+      } else {
+        this.compatibility.warnings = [];
+      }
+
+      if (Array.isArray(this.compatibility.replacementHeadCompatibleWith)) {
+        this.compatibility.replacementHeadCompatibleWith =
+          this.compatibility.replacementHeadCompatibleWith
+            .map((item) => String(item || "").trim())
+            .filter(Boolean);
+      } else {
+        this.compatibility.replacementHeadCompatibleWith = [];
+      }
+    }
 
     // Normalize empty strings -> null for sale dates
     if (!this.saleStartAt) this.saleStartAt = null;

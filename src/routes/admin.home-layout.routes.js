@@ -1,10 +1,17 @@
 import express from "express";
 import { z } from "zod";
+import multer from "multer";
 import { HomeLayout } from "../models/HomeLayout.js";
 import { requireAuth, requirePermission, PERMISSIONS } from "../middleware/auth.js";
 import { auditAdmin } from "../middleware/audit.js";
-import { sendOk, sendError } from "../utils/response.js";
+import { handleUploadError } from "../middleware/upload.js";
+import { sendOk, sendError, sendCreated } from "../utils/response.js";
 import { invalidateHomeCache } from "../utils/cache.js";
+import {
+    uploadBuffer,
+    isCloudinaryConfigured,
+    getDefaultFolder,
+} from "../config/cloudinary.js";
 
 const router = express.Router();
 
@@ -75,6 +82,112 @@ router.put("/", async (req, res, next) => {
         if (error.name === "VersionError") {
             return sendError(res, 409, "CONFLICT", "Layout has been updated by another user. Please refresh.");
         }
+        next(error);
+    }
+});
+
+// ──────────────────────────────────────────────
+// Multer configs for hero media uploads
+// ──────────────────────────────────────────────
+
+const IMAGE_ALLOWED = new Set(["image/jpeg", "image/jpg", "image/png", "image/webp"]);
+const VIDEO_ALLOWED = new Set(["video/mp4", "video/webm", "video/quicktime", "video/x-msvideo"]);
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024; // 10 MB
+const MAX_VIDEO_BYTES = 100 * 1024 * 1024; // 100 MB
+
+const heroImageUpload = multer({
+    storage: multer.memoryStorage(),
+    fileFilter: (_req, file, cb) => {
+        if (!IMAGE_ALLOWED.has(file.mimetype.toLowerCase())) {
+            const err = new Error("نوع الملف غير مسموح. المسموح: JPEG, PNG, WEBP");
+            err.code = "INVALID_FILE_TYPE";
+            err.statusCode = 400;
+            return cb(err, false);
+        }
+        cb(null, true);
+    },
+    limits: { fileSize: MAX_IMAGE_BYTES, files: 1 },
+}).single("file");
+
+const heroVideoUpload = multer({
+    storage: multer.memoryStorage(),
+    fileFilter: (_req, file, cb) => {
+        if (!VIDEO_ALLOWED.has(file.mimetype.toLowerCase())) {
+            const err = new Error("نوع الملف غير مسموح. المسموح: MP4, WebM, MOV");
+            err.code = "INVALID_FILE_TYPE";
+            err.statusCode = 400;
+            return cb(err, false);
+        }
+        cb(null, true);
+    },
+    limits: { fileSize: MAX_VIDEO_BYTES, files: 1 },
+}).single("file");
+
+/**
+ * POST /api/admin/home-layout/upload-image
+ * Upload hero image to Cloudinary
+ */
+router.post("/upload-image", heroImageUpload, handleUploadError, async (req, res, next) => {
+    try {
+        if (!isCloudinaryConfigured()) {
+            return sendError(res, 503, "SERVICE_UNAVAILABLE", "Cloudinary غير مكوّن");
+        }
+        if (!req.file?.buffer) {
+            return sendError(res, 400, "NO_FILE", "لم يتم إرسال ملف. استخدم الحقل 'file'");
+        }
+
+        const folder = `${getDefaultFolder()}/hero`;
+        const result = await uploadBuffer({
+            buffer: req.file.buffer,
+            filename: req.file.originalname || "hero-image",
+            folder,
+            tags: ["hero", "home-layout"],
+            resourceType: "image",
+        });
+
+        sendCreated(res, {
+            url: result.secure_url,
+            publicId: result.public_id,
+            width: result.width,
+            height: result.height,
+            format: result.format,
+            bytes: result.bytes,
+        });
+    } catch (error) {
+        next(error);
+    }
+});
+
+/**
+ * POST /api/admin/home-layout/upload-video
+ * Upload hero video to Cloudinary
+ */
+router.post("/upload-video", heroVideoUpload, handleUploadError, async (req, res, next) => {
+    try {
+        if (!isCloudinaryConfigured()) {
+            return sendError(res, 503, "SERVICE_UNAVAILABLE", "Cloudinary غير مكوّن");
+        }
+        if (!req.file?.buffer) {
+            return sendError(res, 400, "NO_FILE", "لم يتم إرسال ملف. استخدم الحقل 'file'");
+        }
+
+        const folder = `${getDefaultFolder()}/hero`;
+        const result = await uploadBuffer({
+            buffer: req.file.buffer,
+            filename: req.file.originalname || "hero-video",
+            folder,
+            tags: ["hero", "home-layout", "video"],
+            resourceType: "video",
+        });
+
+        sendCreated(res, {
+            url: result.secure_url,
+            publicId: result.public_id,
+            format: result.format,
+            bytes: result.bytes,
+            duration: result.duration,
+        });
+    } catch (error) {
         next(error);
     }
 });

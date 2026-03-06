@@ -40,6 +40,44 @@ function getMainImage(p) {
   return p.imageUrl || "";
 }
 
+function mapVariant(v) {
+  return {
+    _id: v?._id ? String(v._id) : "",
+    id: v?._id ? String(v._id) : "",
+    variantKey: v?.variantKey || "",
+    sku: v?.sku || "",
+    barcode: v?.barcode || "",
+    priceOverride: v?.priceOverride ?? null,
+    priceOverrideMinor: v?.priceOverrideMinor ?? null,
+    stock: Number(v?.stock ?? 0),
+    attributes: Array.isArray(v?.attributes)
+      ? v.attributes.map((a) => ({
+          key: a?.key || "",
+          type: a?.type || "",
+          value: a?.value ?? null,
+          valueKey: a?.valueKey || "",
+          unit: a?.unit || "",
+        }))
+      : [],
+    volumeMl: v?.volumeMl ?? null,
+    weightG: v?.weightG ?? null,
+    packCount: v?.packCount ?? null,
+    scent: v?.scent ?? "",
+    holdLevel: v?.holdLevel ?? "",
+    finishType: v?.finishType ?? "",
+    skinType: v?.skinType ?? "",
+  };
+}
+
+function pickDefaultVariant(rawVariants) {
+  if (!Array.isArray(rawVariants) || rawVariants.length === 0) return null;
+  return (
+    rawVariants.find((v) => Number(v?.stock ?? 0) > 0) ||
+    rawVariants[0] ||
+    null
+  );
+}
+
 /**
  * Map a product document to a list-item DTO shape.
  * Used by: GET /products, GET /wishlist, GET /cart
@@ -50,6 +88,9 @@ export function mapProductListItem(p, { lang = "he", now = new Date() } = {}) {
   const L = normalizeLang(lang);
   const onSale = isSaleActiveByPrice(p, now);
   const images = Array.isArray(p.images) ? p.images.map((img) => mapProductImage(img, L)) : [];
+  const mappedVariants = Array.isArray(p.variants) ? p.variants.map(mapVariant) : [];
+  const hasVariants = mappedVariants.length > 0;
+  const defaultVariant = hasVariants ? mapVariant(pickDefaultVariant(p.variants)) : null;
 
   return {
     // ID normalization: include both _id and id
@@ -94,6 +135,9 @@ export function mapProductListItem(p, { lang = "he", now = new Date() } = {}) {
     netQuantity: p.netQuantity ?? null,
     tags: Array.isArray(p.tags) ? p.tags : [],
     slug: p.slug || "",
+    hasVariants,
+    defaultVariant,
+    variants: mappedVariants,
 
     // NOTE: isFeatured/isBestSeller removed from public API.
     // Rankings must be computed from real data via ranking endpoints.

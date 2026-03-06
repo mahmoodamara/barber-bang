@@ -9,7 +9,11 @@ import { Product } from "../models/Product.js";
 import { User } from "../models/User.js";
 import { RFQ } from "../models/RFQ.js";
 
-import { requireAuth, requireAnyPermission, PERMISSIONS } from "../middleware/auth.js";
+import {
+  requireAuth,
+  requireAnyPermission,
+  PERMISSIONS,
+} from "../middleware/auth.js";
 import { sendOk, sendError } from "../utils/response.js";
 
 /** Allowed period values for main KPI comparison (current vs previous period). */
@@ -33,8 +37,8 @@ router.use(
   requireAnyPermission(
     PERMISSIONS.ORDERS_WRITE,
     PERMISSIONS.PRODUCTS_WRITE,
-    PERMISSIONS.SETTINGS_WRITE
-  )
+    PERMISSIONS.SETTINGS_WRITE,
+  ),
 );
 
 /* ============================
@@ -116,7 +120,7 @@ function jsonErr(res, e) {
     res,
     e.statusCode || 500,
     e.code || "INTERNAL_ERROR",
-    e.message || "Unexpected error"
+    e.message || "Unexpected error",
   );
 }
 
@@ -135,13 +139,14 @@ function daysAgoStartInTZ(days, tz = BUSINESS_TZ) {
  * When you add countryCode to Order and set it in checkout, orders will filter by IL.
  */
 function ordersScopeMatch() {
-  const isIsrael = COUNTRY_PATHS.map((path) => ({ [path]: ISRAEL_COUNTRY_CODE }));
-  const noCountrySet = COUNTRY_PATHS.map((path) => ({ [path]: { $exists: false } }));
+  const isIsrael = COUNTRY_PATHS.map((path) => ({
+    [path]: ISRAEL_COUNTRY_CODE,
+  }));
+  const noCountrySet = COUNTRY_PATHS.map((path) => ({
+    [path]: { $exists: false },
+  }));
   return {
-    $or: [
-      ...isIsrael,
-      { $and: noCountrySet },
-    ],
+    $or: [...isIsrael, { $and: noCountrySet }],
   };
 }
 
@@ -156,7 +161,9 @@ function ifNullNumber(path, fallback = 0) {
  * Parse period query (e.g. "30d") to number of days. Default 30.
  */
 function parsePeriodDays(period) {
-  const p = String(period || "").trim().toLowerCase();
+  const p = String(period || "")
+    .trim()
+    .toLowerCase();
   if (!ALLOWED_PERIODS.has(p)) return 30; // default for "30d"
   return parseInt(p.replace(/\D/g, ""), 10) || 30;
 }
@@ -170,7 +177,9 @@ function getPeriodBounds(periodDays, tz = BUSINESS_TZ) {
   const todayStart = now.startOf("day").toJSDate();
   const periodStart = now.minus({ days: periodDays }).startOf("day").toJSDate();
   const previousPeriodEnd = periodStart;
-  const previousPeriodStart = DateTime.fromJSDate(previousPeriodEnd, { zone: tz })
+  const previousPeriodStart = DateTime.fromJSDate(previousPeriodEnd, {
+    zone: tz,
+  })
     .minus({ days: periodDays })
     .startOf("day")
     .toJSDate();
@@ -187,7 +196,8 @@ function getPeriodBounds(periodDays, tz = BUSINESS_TZ) {
  */
 function percentChange(current, previous) {
   if (previous == null || previous === 0) return null;
-  const change = ((Number(current) - Number(previous)) / Number(previous)) * 100;
+  const change =
+    ((Number(current) - Number(previous)) / Number(previous)) * 100;
   return Math.round(change * 100) / 100;
 }
 
@@ -221,8 +231,12 @@ function scopeMatchForLookupOrder(orderFieldName) {
 
 router.get("/", async (req, res) => {
   try {
-    const periodParam = String(req.query?.period || DEFAULT_PERIOD).trim().toLowerCase();
-    const period = ALLOWED_PERIODS.has(periodParam) ? periodParam : DEFAULT_PERIOD;
+    const periodParam = String(req.query?.period || DEFAULT_PERIOD)
+      .trim()
+      .toLowerCase();
+    const period = ALLOWED_PERIODS.has(periodParam)
+      ? periodParam
+      : DEFAULT_PERIOD;
     const periodDays = parsePeriodDays(period);
     const latestLimit = parseLatestLimit(req.query?.limit);
 
@@ -238,7 +252,8 @@ router.get("/", async (req, res) => {
     const sevenDaysAgo = daysAgoStartInTZ(7, BUSINESS_TZ);
     const thirtyDaysAgo = daysAgoStartInTZ(30, BUSINESS_TZ);
     const bounds = getPeriodBounds(periodDays, BUSINESS_TZ);
-    const { periodStart, periodEnd, previousPeriodStart, previousPeriodEnd } = bounds;
+    const { periodStart, periodEnd, previousPeriodStart, previousPeriodEnd } =
+      bounds;
 
     const ordersMatch = ordersScopeMatch();
     const ORDERS_COLLECTION = Order.collection.name;
@@ -268,7 +283,12 @@ router.get("/", async (req, res) => {
             status: { $in: PAID_STATUSES },
           },
         },
-        { $group: { _id: null, total: { $sum: ifNullNumber("$pricing.total", 0) } } },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: ifNullNumber("$pricing.total", 0) },
+          },
+        },
       ]),
       Order.aggregate([
         {
@@ -278,7 +298,12 @@ router.get("/", async (req, res) => {
             status: { $in: PAID_STATUSES },
           },
         },
-        { $group: { _id: null, total: { $sum: ifNullNumber("$pricing.total", 0) } } },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: ifNullNumber("$pricing.total", 0) },
+          },
+        },
       ]),
       Order.aggregate([
         {
@@ -288,7 +313,12 @@ router.get("/", async (req, res) => {
             status: { $in: PAID_STATUSES },
           },
         },
-        { $group: { _id: null, total: { $sum: ifNullNumber("$pricing.total", 0) } } },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: ifNullNumber("$pricing.total", 0) },
+          },
+        },
       ]),
       Order.aggregate([
         {
@@ -298,7 +328,12 @@ router.get("/", async (req, res) => {
             status: { $in: PAID_STATUSES },
           },
         },
-        { $group: { _id: null, total: { $sum: ifNullNumber("$pricing.total", 0) } } },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: ifNullNumber("$pricing.total", 0) },
+          },
+        },
       ]),
       Order.aggregate([
         {
@@ -308,7 +343,12 @@ router.get("/", async (req, res) => {
             status: { $in: PAID_STATUSES },
           },
         },
-        { $group: { _id: null, total: { $sum: ifNullNumber("$pricing.total", 0) } } },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: ifNullNumber("$pricing.total", 0) },
+          },
+        },
       ]),
       Order.countDocuments({ ...ordersMatch, createdAt: { $gte: todayStart } }),
       Order.countDocuments({
@@ -324,8 +364,21 @@ router.get("/", async (req, res) => {
         status: { $in: PENDING_FULFILLMENT_STATUSES },
       }),
       ReturnRequest.aggregate([
-        { $match: { status: { $in: ["requested", "approved", "received", "refund_pending"] } } },
-        { $lookup: { from: ORDERS_COLLECTION, localField: "orderId", foreignField: "_id", as: "order" } },
+        {
+          $match: {
+            status: {
+              $in: ["requested", "approved", "received", "refund_pending"],
+            },
+          },
+        },
+        {
+          $lookup: {
+            from: ORDERS_COLLECTION,
+            localField: "orderId",
+            foreignField: "_id",
+            as: "order",
+          },
+        },
         { $unwind: "$order" },
         { $match: scopeMatchForLookupOrder("order") },
         { $count: "count" },
@@ -357,24 +410,45 @@ router.get("/", async (req, res) => {
             unitsSold: { $sum: ifNullNumber("$items.qty", 0) },
             revenue: {
               $sum: {
-                $multiply: [ifNullNumber("$items.unitPrice", 0), ifNullNumber("$items.qty", 0)],
+                $multiply: [
+                  ifNullNumber("$items.unitPrice", 0),
+                  ifNullNumber("$items.qty", 0),
+                ],
               },
             },
           },
         },
         { $sort: { unitsSold: -1 } },
         { $limit: 10 },
-        { $project: { _id: 0, productId: "$_id", title: 1, titleAr: 1, unitsSold: 1, revenue: 1 } },
+        {
+          $project: {
+            _id: 0,
+            productId: "$_id",
+            title: 1,
+            titleAr: 1,
+            unitsSold: 1,
+            revenue: 1,
+          },
+        },
       ]),
       Order.find(ordersMatch)
         .sort({ createdAt: -1 })
         .limit(latestLimit)
-        .select("_id orderNumber status paymentMethod pricing.total createdAt shipping.address.fullName")
+        .select(
+          "_id orderNumber status paymentMethod pricing.total createdAt shipping.address.fullName",
+        )
         .lean(),
       ReturnRequest.aggregate([
         { $sort: { requestedAt: -1 } },
         { $limit: Math.min(latestLimit + 10, 60) },
-        { $lookup: { from: ORDERS_COLLECTION, localField: "orderId", foreignField: "_id", as: "order" } },
+        {
+          $lookup: {
+            from: ORDERS_COLLECTION,
+            localField: "orderId",
+            foreignField: "_id",
+            as: "order",
+          },
+        },
         { $unwind: "$order" },
         { $match: scopeMatchForLookupOrder("order") },
         { $limit: latestLimit },
@@ -461,7 +535,10 @@ router.get("/", async (req, res) => {
  * Set Cache-Control and ETag; if client sent matching If-None-Match, send 304 and return true.
  */
 function setDashboardHeaders(req, res, payload) {
-  res.setHeader("Cache-Control", `private, max-age=${DASHBOARD_CACHE_MAX_AGE_SEC}`);
+  res.setHeader(
+    "Cache-Control",
+    `private, max-age=${DASHBOARD_CACHE_MAX_AGE_SEC}`,
+  );
   const etag = createHash("md5").update(JSON.stringify(payload)).digest("hex");
   const etagHeader = `"${etag}"`;
   res.setHeader("ETag", etagHeader);
@@ -489,7 +566,11 @@ router.get("/b2b", async (req, res) => {
       rfqCounts,
     ] = await Promise.all([
       User.countDocuments({ accountType: "business" }),
-      User.countDocuments({ b2bAppliedAt: { $ne: null }, b2bApproved: false, b2bRejectedAt: null }),
+      User.countDocuments({
+        b2bAppliedAt: { $ne: null },
+        b2bApproved: false,
+        b2bRejectedAt: null,
+      }),
       User.countDocuments({ b2bApproved: true }),
       User.aggregate([
         { $match: { b2bApproved: true } },
@@ -526,7 +607,11 @@ router.get("/b2b", async (req, res) => {
       rfqMap[r._id] = r.count;
     }
 
-    const orderStats = b2bOrders[0] || { totalOrders: 0, totalRevenue: 0, avgOrderValue: 0 };
+    const orderStats = b2bOrders[0] || {
+      totalOrders: 0,
+      totalRevenue: 0,
+      avgOrderValue: 0,
+    };
 
     // Top B2B customers by revenue
     const topCustomers = await Order.aggregate([
@@ -580,7 +665,12 @@ router.get("/b2b", async (req, res) => {
       },
     });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: { code: "INTERNAL_ERROR", message: e.message } });
+    return res
+      .status(500)
+      .json({
+        ok: false,
+        error: { code: "INTERNAL_ERROR", message: e.message },
+      });
   }
 });
 

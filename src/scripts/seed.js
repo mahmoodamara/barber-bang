@@ -63,7 +63,7 @@ import {
 const STORE = {
   nameHe: "Barber Bang",
   nameAr: "باربر بانغ",
-  brandDisplayHe: "Pier Jouliet x Kemei",
+  brandDisplayHe: "משלוח במהיר לכל חלקי הארץ",
   brandDisplayAr: "Pier Jouliet x Kemei",
 
   phone: "+972502934825",

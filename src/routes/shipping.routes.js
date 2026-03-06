@@ -1,10 +1,14 @@
 // src/routes/shipping.routes.js
 import express from "express";
+import { z } from "zod";
 
 import { DeliveryArea } from "../models/DeliveryArea.js";
 import { PickupPoint } from "../models/PickupPoint.js";
 import { StorePickupConfig } from "../models/StorePickupConfig.js";
 import { t } from "../utils/i18n.js";
+import { validate } from "../middleware/validate.js";
+import { calculateShipping, getShippingConfig } from "../services/shipping.service.js";
+import { sendOk, setPrivateNoStore } from "../utils/response.js";
 
 const router = express.Router();
 
@@ -97,5 +101,65 @@ router.get("/options", async (req, res, next) => {
     return next(e);
   }
 });
+
+/**
+ * GET /api/shipping/config
+ * Public read-only shipping config for UI display (banner/threshold text).
+ */
+router.get("/config", async (req, res, next) => {
+  try {
+    setPrivateNoStore(res);
+    const config = await getShippingConfig();
+    return sendOk(res, {
+      freeShippingThreshold: {
+        retail: Number(config?.freeShippingThreshold?.retail || 0),
+        wholesale: Number(config?.freeShippingThreshold?.wholesale || 0),
+      },
+      baseShippingPrice: {
+        retail: Number(config?.baseShippingPrice?.retail || 0),
+        wholesale: Number(config?.baseShippingPrice?.wholesale || 0),
+      },
+    });
+  } catch (e) {
+    return next(e);
+  }
+});
+
+/* ======================================================================
+   POST /api/shipping/calculate
+   Body: { customerType: "retail" | "wholesale", orderTotal: number }
+
+   Returns the shipping cost for the given cart total.
+   All pricing logic lives in the service — React only receives the result.
+   The checkout flow recalculates independently on the server before saving
+   any order, so this endpoint is safe for display-only use.
+====================================================================== */
+
+const calculateSchema = z.object({
+  body: z
+    .object({
+      customerType: z.enum(["retail", "wholesale"]),
+      orderTotal:   z.number().nonnegative().finite(),
+    })
+    .strict(),
+});
+
+router.post(
+  "/calculate",
+  validate(calculateSchema),
+  async (req, res, next) => {
+    try {
+      // Never cache — this is a personalized, dynamic computation.
+      setPrivateNoStore(res);
+
+      const { customerType, orderTotal } = req.validated.body;
+      const result = await calculateShipping(customerType, orderTotal);
+
+      return sendOk(res, result);
+    } catch (e) {
+      return next(e);
+    }
+  }
+);
 
 export default router;

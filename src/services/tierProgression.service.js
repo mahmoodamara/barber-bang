@@ -71,7 +71,9 @@ export async function recalculateTotalSpent(userId) {
   const result = await Order.aggregate([
     {
       $match: {
-        userId: (await import("mongoose")).default.Types.ObjectId.createFromHexString(userId),
+        userId: (
+          await import("mongoose")
+        ).default.Types.ObjectId.createFromHexString(userId),
         isB2B: true,
         status: { $nin: ["cancelled", "refunded"] },
       },

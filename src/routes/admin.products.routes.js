@@ -305,6 +305,22 @@ function mapProductAdmin(p, lang) {
     packageIncludesHe: Array.isArray(obj.packageIncludesHe) ? obj.packageIncludesHe : [],
     packageIncludesAr: Array.isArray(obj.packageIncludesAr) ? obj.packageIncludesAr : [],
     compatibility: {
+      type: String(obj.compatibility?.type || "not_applicable"),
+      models: Array.isArray(obj.compatibility?.models)
+        ? obj.compatibility.models
+            .map((m) => ({
+              brand: String(m?.brand || "").trim(),
+              model: String(m?.model || "").trim(),
+              notes: String(m?.notes || "").trim(),
+            }))
+            .filter((m) => m.brand && m.model)
+        : [],
+      warnings: Array.isArray(obj.compatibility?.warnings)
+        ? obj.compatibility.warnings
+            .map((w) => String(w || "").trim())
+            .filter(Boolean)
+        : [],
+      source: String(obj.compatibility?.source || "internal"),
       replacementHeadCompatibleWith: Array.isArray(
         obj.compatibility?.replacementHeadCompatibleWith
       )
@@ -498,10 +514,25 @@ const specsSchema = z
   })
   .optional();
 
+const compatibilityModelSchema = z
+  .object({
+    brand: z.string().min(1).max(120),
+    model: z.string().min(1).max(160),
+    notes: z.string().max(500).optional(),
+  })
+  .strict();
+
 const compatibilitySchema = z
   .object({
+    type: z
+      .enum(["fits_models", "fits_devices", "universal", "not_applicable"])
+      .optional(),
+    models: z.array(compatibilityModelSchema).max(200).optional(),
+    warnings: z.array(z.string().max(500)).max(50).optional(),
+    source: z.enum(["manufacturer", "internal"]).optional(),
     replacementHeadCompatibleWith: z.array(z.string().max(120)).max(50).optional(),
   })
+  .strict()
   .optional();
 
 const publishContentSchema = z

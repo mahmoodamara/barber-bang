@@ -2,15 +2,20 @@ import express from "express";
 import { z } from "zod";
 import mongoose from "mongoose";
 import { validate } from "../middleware/validate.js";
-import { requireAuth, optionalAuth } from "../middleware/auth.js";
+import { requireAuth } from "../middleware/auth.js";
 import { User } from "../models/User.js";
 import { RFQ } from "../models/RFQ.js";
 import { Product } from "../models/Product.js";
-import { OrderTemplate } from "../models/OrderTemplate.js";
+import { SavedList } from "../models/SavedList.js";
+import { SavedListItem } from "../models/SavedListItem.js";
 import { SampleRequest } from "../models/SampleRequest.js";
 import { RecurringOrder } from "../models/RecurringOrder.js";
 
 const router = express.Router();
+
+function normalizePhone(raw) {
+  return String(raw || "").trim().replace(/[^\d+]/g, "");
+}
 
 /**
  * POST /api/v1/b2b/apply
@@ -19,11 +24,17 @@ const router = express.Router();
  */
 const applySchema = z.object({
   body: z.object({
-    businessName: z.string().min(2).max(200),
-    businessId: z.string().min(1).max(50).optional(),
-    taxId: z.string().max(50).optional(),
-    phone: z.string().min(5).max(20).optional(),
-    notes: z.string().max(1000).optional(),
+    businessName: z.string().trim().min(2).max(200),
+    phone: z
+      .string()
+      .trim()
+      .min(5)
+      .max(40)
+      .transform((v) => normalizePhone(v))
+      .refine((v) => v.length >= 8 && v.length <= 20, {
+        message: "Invalid phone number",
+      }),
+    message: z.string().trim().max(300).optional(),
   }),
 });
 
@@ -33,7 +44,7 @@ router.post(
   validate(applySchema),
   async (req, res) => {
     try {
-      const { businessName, businessId, taxId } =
+      const { businessName, phone, message } =
         req.validated?.body ?? req.body;
 
       const user = await User.findById(req.user._id);
@@ -52,8 +63,8 @@ router.post(
 
       user.accountType = "business";
       user.businessName = businessName;
-      if (businessId) user.businessId = businessId;
-      if (taxId) user.taxId = taxId;
+      user.b2bPhone = phone;
+      user.b2bMessage = message || "";
       user.b2bAppliedAt = new Date();
 
       await user.save();
@@ -77,7 +88,7 @@ router.post(
 router.get("/status", requireAuth(), async (req, res) => {
   try {
     const user = await User.findById(req.user._id).select(
-      "accountType businessName wholesaleTier b2bApproved b2bAppliedAt b2bApprovedAt",
+      "accountType businessName b2bPhone b2bMessage wholesaleTier b2bApproved b2bAppliedAt b2bApprovedAt",
     );
     if (!user) {
       return res
@@ -93,6 +104,8 @@ router.get("/status", requireAuth(), async (req, res) => {
       data: {
         accountType: user.accountType,
         businessName: user.businessName,
+        b2bPhone: user.b2bPhone || "",
+        b2bMessage: user.b2bMessage || "",
         wholesaleTier: user.wholesaleTier,
         b2bApproved: user.b2bApproved,
         b2bAppliedAt: user.b2bAppliedAt,
@@ -236,119 +249,455 @@ router.get("/rfq/:id", requireAuth(), async (req, res) => {
 });
 
 /* ============================
-   Order Templates
+   Saved Lists (Requisition Lists)
 ============================ */
 
-const templateCreateSchema = z.object({
+const MAX_SAVED_LISTS = 20;
+const MAX_SAVED_LIST_ITEMS = 200;
+
+const savedListItemSchema = z.object({
+  productId: z.string().min(1),
+  qty: z.number().int().min(1).max(9999),
+  variantId: z.string().optional(),
+});
+
+const savedListCreateSchema = z.object({
   body: z.object({
     name: z.string().min(1).max(200),
     items: z
-      .array(z.object({
-        productId: z.string().min(1),
-        qty: z.number().int().min(1).max(9999),
-        variantId: z.string().optional(),
-      }))
-      .min(1)
-      .max(100),
+      .array(savedListItemSchema)
+      .min(0)
+      .max(MAX_SAVED_LIST_ITEMS)
+      .optional()
+      .default([]),
   }),
 });
 
-router.post("/templates", requireAuth(), validate(templateCreateSchema), async (req, res) => {
+const savedListUpdateSchema = z.object({
+  body: z.object({
+    name: z.string().min(1).max(200).optional(),
+    items: z
+      .array(savedListItemSchema)
+      .min(0)
+      .max(MAX_SAVED_LIST_ITEMS)
+      .optional(),
+  }).refine((d) => d.name !== undefined || d.items !== undefined, {
+    message: "At least name or items must be provided",
+  }),
+});
+
+function clampSavedListQty(rawQty) {
+  const qty = Number(rawQty || 1);
+  if (!Number.isFinite(qty)) return 1;
+  return Math.max(1, Math.min(9999, Math.floor(qty)));
+}
+
+function normalizeSavedListVariantId(rawVariantId) {
+  return String(rawVariantId || "").trim();
+}
+
+function toObjectIdString(rawId) {
+  const id = String(rawId || "").trim();
+  return mongoose.Types.ObjectId.isValid(id) ? id : "";
+}
+
+async function requireB2BUser(req, res) {
+  const user = await User.findById(req.user._id).select("b2bApproved").lean();
+  if (!user?.b2bApproved) {
+    res.status(403).json({
+      ok: false,
+      error: { code: "NOT_B2B", message: "B2B account required" },
+    });
+    return null;
+  }
+  return user;
+}
+
+async function sanitizeSavedListItems(itemsRaw = []) {
+  if (!Array.isArray(itemsRaw) || itemsRaw.length === 0) return [];
+
+  const normalized = itemsRaw
+    .map((it) => ({
+      productId: toObjectIdString(it?.productId),
+      qty: clampSavedListQty(it?.qty),
+      variantId: normalizeSavedListVariantId(it?.variantId),
+    }))
+    .filter((it) => it.productId);
+
+  if (!normalized.length) return [];
+
+  const uniqueProductIds = [...new Set(normalized.map((it) => it.productId))];
+  const products = await Product.find({ _id: { $in: uniqueProductIds } })
+    .select("_id variants._id")
+    .lean();
+  const productMap = new Map(products.map((p) => [String(p._id), p]));
+
+  const dedup = new Map();
+  for (const item of normalized) {
+    const product = productMap.get(item.productId);
+    if (!product) continue;
+
+    const variants = Array.isArray(product.variants) ? product.variants : [];
+    const hasVariants = variants.length > 0;
+
+    let normalizedVariantId = "";
+    if (hasVariants) {
+      if (!item.variantId) continue;
+      const variant = variants.find((v) => String(v?._id || "") === item.variantId);
+      if (!variant) continue;
+      normalizedVariantId = item.variantId;
+    }
+
+    const key = `${item.productId}:${normalizedVariantId}`;
+    dedup.set(key, {
+      productId: item.productId,
+      variantId: normalizedVariantId,
+      qty: item.qty,
+    });
+  }
+
+  return Array.from(dedup.values());
+}
+
+async function fetchSavedListsByUser(userId, listIds = null) {
+  const query = { userId };
+  if (Array.isArray(listIds) && listIds.length > 0) {
+    query._id = { $in: listIds };
+  }
+
+  const lists = await SavedList.find(query)
+    .sort({ createdAt: -1 })
+    .lean();
+
+  if (!lists.length) return [];
+
+  const ids = lists.map((l) => l._id);
+  const items = await SavedListItem.find({ listId: { $in: ids } })
+    .sort({ createdAt: 1 })
+    .lean();
+
+  const productIds = [...new Set(items.map((it) => String(it.productId || "")).filter(Boolean))];
+  const products = productIds.length
+    ? await Product.find({ _id: { $in: productIds } })
+      .select(
+        "_id titleHe titleAr title slug images variants._id variants.variantKey variants.sku",
+      )
+      .lean()
+    : [];
+
+  const productMap = new Map(products.map((p) => [String(p._id), p]));
+  const itemsByListId = new Map();
+  for (const it of items) {
+    const key = String(it.listId);
+    if (!itemsByListId.has(key)) itemsByListId.set(key, []);
+    itemsByListId.get(key).push(it);
+  }
+
+  return lists.map((list) => {
+    const listItems = itemsByListId.get(String(list._id)) || [];
+    const mappedItems = listItems.map((it) => {
+      const product = productMap.get(String(it.productId));
+      const variants = Array.isArray(product?.variants) ? product.variants : [];
+      const variant = it.variantId
+        ? variants.find((v) => String(v?._id || "") === String(it.variantId || ""))
+        : null;
+
+      return {
+        productId: product
+          ? {
+            _id: product._id,
+            titleHe: product.titleHe || "",
+            titleAr: product.titleAr || "",
+            title: product.title || "",
+            slug: product.slug || "",
+            images: Array.isArray(product.images) ? product.images : [],
+          }
+          : String(it.productId),
+        qty: clampSavedListQty(it.qty),
+        variantId: it.variantId || undefined,
+        variantLabel: variant?.variantKey || variant?.sku || undefined,
+      };
+    });
+
+    return {
+      ...list,
+      items: mappedItems,
+    };
+  });
+}
+
+const createSavedListHandler = async (req, res) => {
   try {
-    const user = await User.findById(req.user._id).select("b2bApproved").lean();
-    if (!user?.b2bApproved) {
-      return res.status(403).json({ ok: false, error: { code: "NOT_B2B", message: "B2B account required" } });
+    const b2bUser = await requireB2BUser(req, res);
+    if (!b2bUser) return;
+
+    const { name, items } = req.validated?.body ?? req.body;
+    const existing = await SavedList.countDocuments({ userId: req.user._id });
+    if (existing >= MAX_SAVED_LISTS) {
+      return res.status(400).json({
+        ok: false,
+        error: {
+          code: "LIMIT_REACHED",
+          message: `Max ${MAX_SAVED_LISTS} saved lists`,
+        },
+      });
+    }
+
+    const savedList = await SavedList.create({
+      userId: req.user._id,
+      name: String(name || "").trim(),
+    });
+
+    const normalizedItems = await sanitizeSavedListItems(items || []);
+    if (normalizedItems.length > 0) {
+      await SavedListItem.insertMany(
+        normalizedItems.map((it) => ({
+          listId: savedList._id,
+          productId: it.productId,
+          variantId: it.variantId || "",
+          qty: it.qty,
+        })),
+      );
+    }
+
+    const [enriched] = await fetchSavedListsByUser(req.user._id, [savedList._id]);
+    return res.status(201).json({
+      ok: true,
+      data: enriched || { ...savedList.toObject(), items: [] },
+    });
+  } catch (e) {
+    return res.status(500).json({
+      ok: false,
+      error: { code: "INTERNAL_ERROR", message: e.message },
+    });
+  }
+};
+
+const listSavedListsHandler = async (req, res) => {
+  try {
+    const b2bUser = await requireB2BUser(req, res);
+    if (!b2bUser) return;
+
+    const lists = await fetchSavedListsByUser(req.user._id);
+    return res.json({ ok: true, data: lists });
+  } catch (e) {
+    return res.status(500).json({
+      ok: false,
+      error: { code: "INTERNAL_ERROR", message: e.message },
+    });
+  }
+};
+
+const updateSavedListHandler = async (req, res) => {
+  try {
+    const b2bUser = await requireB2BUser(req, res);
+    if (!b2bUser) return;
+
+    if (!mongoose.Types.ObjectId.isValid(String(req.params.id || ""))) {
+      return res.status(404).json({
+        ok: false,
+        error: { code: "NOT_FOUND", message: "Saved list not found" },
+      });
+    }
+
+    const savedList = await SavedList.findOne({
+      _id: req.params.id,
+      userId: req.user._id,
+    });
+    if (!savedList) {
+      return res.status(404).json({
+        ok: false,
+        error: { code: "NOT_FOUND", message: "Saved list not found" },
+      });
     }
 
     const { name, items } = req.validated?.body ?? req.body;
-    const existing = await OrderTemplate.countDocuments({ userId: req.user._id });
-    if (existing >= 20) {
-      return res.status(400).json({ ok: false, error: { code: "LIMIT_REACHED", message: "Max 20 templates" } });
+    if (name !== undefined) {
+      savedList.name = String(name || "").trim();
+    }
+    await savedList.save();
+
+    if (items !== undefined) {
+      const normalizedItems = await sanitizeSavedListItems(items || []);
+      await SavedListItem.deleteMany({ listId: savedList._id });
+      if (normalizedItems.length > 0) {
+        await SavedListItem.insertMany(
+          normalizedItems.map((it) => ({
+            listId: savedList._id,
+            productId: it.productId,
+            variantId: it.variantId || "",
+            qty: it.qty,
+          })),
+        );
+      }
     }
 
-    const template = await OrderTemplate.create({ userId: req.user._id, name, items });
-    return res.status(201).json({ ok: true, data: template.toObject() });
+    const [enriched] = await fetchSavedListsByUser(req.user._id, [savedList._id]);
+    return res.json({
+      ok: true,
+      data: enriched || { ...savedList.toObject(), items: [] },
+    });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: { code: "INTERNAL_ERROR", message: e.message } });
+    return res.status(500).json({
+      ok: false,
+      error: { code: "INTERNAL_ERROR", message: e.message },
+    });
   }
-});
+};
 
-router.get("/templates", requireAuth(), async (req, res) => {
+const deleteSavedListHandler = async (req, res) => {
   try {
-    const templates = await OrderTemplate.find({ userId: req.user._id })
-      .sort({ createdAt: -1 })
-      .lean();
-    return res.json({ ok: true, data: templates });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: { code: "INTERNAL_ERROR", message: e.message } });
-  }
-});
+    const b2bUser = await requireB2BUser(req, res);
+    if (!b2bUser) return;
 
-router.delete("/templates/:id", requireAuth(), async (req, res) => {
-  try {
-    const result = await OrderTemplate.deleteOne({ _id: req.params.id, userId: req.user._id });
+    if (!mongoose.Types.ObjectId.isValid(String(req.params.id || ""))) {
+      return res.status(404).json({
+        ok: false,
+        error: { code: "NOT_FOUND", message: "Saved list not found" },
+      });
+    }
+
+    const result = await SavedList.deleteOne({
+      _id: req.params.id,
+      userId: req.user._id,
+    });
     if (result.deletedCount === 0) {
-      return res.status(404).json({ ok: false, error: { code: "NOT_FOUND", message: "Template not found" } });
+      return res.status(404).json({
+        ok: false,
+        error: { code: "NOT_FOUND", message: "Saved list not found" },
+      });
     }
+
+    await SavedListItem.deleteMany({ listId: req.params.id });
     return res.json({ ok: true, data: { deleted: true } });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: { code: "INTERNAL_ERROR", message: e.message } });
+    return res.status(500).json({
+      ok: false,
+      error: { code: "INTERNAL_ERROR", message: e.message },
+    });
   }
-});
+};
 
 /**
- * POST /api/v1/b2b/templates/:id/add-to-cart
- * Add all items from a saved template to cart.
+ * POST /api/v1/b2b/saved-lists/:id/add-to-cart
+ * Add all items from a saved list to cart.
  */
-router.post("/templates/:id/add-to-cart", requireAuth(), async (req, res) => {
+const addSavedListToCartHandler = async (req, res) => {
   try {
-    const template = await OrderTemplate.findOne({ _id: req.params.id, userId: req.user._id }).lean();
-    if (!template) {
-      return res.status(404).json({ ok: false, error: { code: "NOT_FOUND", message: "Template not found" } });
+    const b2bUser = await requireB2BUser(req, res);
+    if (!b2bUser) return;
+
+    if (!mongoose.Types.ObjectId.isValid(String(req.params.id || ""))) {
+      return res.status(404).json({
+        ok: false,
+        error: { code: "NOT_FOUND", message: "Saved list not found" },
+      });
+    }
+
+    const savedList = await SavedList.findOne({
+      _id: req.params.id,
+      userId: req.user._id,
+    }).lean();
+    if (!savedList) {
+      return res.status(404).json({
+        ok: false,
+        error: { code: "NOT_FOUND", message: "Saved list not found" },
+      });
     }
 
     const user = await User.findById(req.user._id);
     if (!user) {
-      return res.status(404).json({ ok: false, error: { code: "NOT_FOUND", message: "User not found" } });
+      return res.status(404).json({
+        ok: false,
+        error: { code: "NOT_FOUND", message: "User not found" },
+      });
     }
 
+    const savedListItems = await SavedListItem.find({ listId: savedList._id }).lean();
+    if (!savedListItems.length) {
+      return res.json({
+        ok: true,
+        data: { addedCount: 0, cartSize: Array.isArray(user.cart) ? user.cart.length : 0 },
+      });
+    }
+
+    const productIds = [...new Set(savedListItems.map((it) => String(it.productId || "")).filter(Boolean))];
+    const products = await Product.find({ _id: { $in: productIds } })
+      .select("_id isActive stock variants._id variants.stock")
+      .lean();
+    const productMap = new Map(products.map((p) => [String(p._id), p]));
+
     let addedCount = 0;
-    for (const item of template.items) {
-      const product = await Product.findById(item.productId).select("_id isActive stock").lean();
-      if (!product || !product.isActive || product.stock <= 0) continue;
+    for (const item of savedListItems) {
+      const product = productMap.get(String(item.productId || ""));
+      if (!product || !product.isActive) continue;
+
+      const variants = Array.isArray(product.variants) ? product.variants : [];
+      const hasVariants = variants.length > 0;
+      let targetVariantId = "";
+      let available = Number(product.stock || 0);
+
+      if (hasVariants) {
+        targetVariantId = String(item.variantId || "");
+        if (!targetVariantId) continue;
+        const variant = variants.find((v) => String(v?._id || "") === targetVariantId);
+        if (!variant) continue;
+        available = Number(variant.stock || 0);
+      }
+
+      if (available <= 0) continue;
+
+      const safeQty = Math.max(1, Math.min(clampSavedListQty(item.qty), available, 999));
 
       const existingIdx = (user.cart || []).findIndex(
-        (c) => String(c.productId) === String(item.productId) && String(c.variantId || "") === String(item.variantId || ""),
+        (c) =>
+          String(c.productId) === String(item.productId) &&
+          String(c.variantId || "") === targetVariantId,
       );
 
       if (existingIdx >= 0) {
-        user.cart[existingIdx].qty = item.qty;
+        user.cart[existingIdx].qty = safeQty;
       } else {
         user.cart.push({
           productId: item.productId,
-          qty: item.qty,
-          variantId: item.variantId || undefined,
+          qty: safeQty,
+          variantId: targetVariantId,
         });
       }
       addedCount++;
     }
 
     await user.save();
-    return res.json({ ok: true, data: { addedCount, cartSize: user.cart.length } });
+    return res.json({
+      ok: true,
+      data: { addedCount, cartSize: user.cart.length },
+    });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: { code: "INTERNAL_ERROR", message: e.message } });
+    return res.status(500).json({
+      ok: false,
+      error: { code: "INTERNAL_ERROR", message: e.message },
+    });
   }
-});
+};
 
 /**
- * POST /api/v1/b2b/templates/from-order/:orderId
- * Create a template from an existing order.
+ * POST /api/v1/b2b/saved-lists/from-order/:orderId
+ * Create a saved list from an existing order.
  */
-router.post("/templates/from-order/:orderId", requireAuth(), async (req, res) => {
+const createSavedListFromOrderHandler = async (req, res) => {
   try {
-    const user = await User.findById(req.user._id).select("b2bApproved").lean();
-    if (!user?.b2bApproved) {
-      return res.status(403).json({ ok: false, error: { code: "NOT_B2B", message: "B2B account required" } });
+    const b2bUser = await requireB2BUser(req, res);
+    if (!b2bUser) return;
+
+    const existing = await SavedList.countDocuments({ userId: req.user._id });
+    if (existing >= MAX_SAVED_LISTS) {
+      return res.status(400).json({
+        ok: false,
+        error: {
+          code: "LIMIT_REACHED",
+          message: `Max ${MAX_SAVED_LISTS} saved lists`,
+        },
+      });
     }
 
     const { default: Order } = await import("../models/Order.js");
@@ -357,20 +706,76 @@ router.post("/templates/from-order/:orderId", requireAuth(), async (req, res) =>
       return res.status(404).json({ ok: false, error: { code: "NOT_FOUND", message: "Order not found" } });
     }
 
-    const items = (order.items || []).map((i) => ({
-      productId: i.productId,
+    const normalizedItems = await sanitizeSavedListItems((order.items || []).map((i) => ({
+      productId: String(i.productId || ""),
       qty: i.qty || 1,
-      variantId: i.variantId || undefined,
-    }));
+      variantId: i.variantId || "",
+    })));
 
-    const name = req.body?.name || `Order #${order.orderNumber || String(order._id).slice(-6)}`;
+    const inputName = String(req.body?.name || "").trim();
+    const name = inputName || `Order #${order.orderNumber || String(order._id).slice(-6)}`;
 
-    const template = await OrderTemplate.create({ userId: req.user._id, name, items });
-    return res.status(201).json({ ok: true, data: template.toObject() });
+    const savedList = await SavedList.create({ userId: req.user._id, name });
+
+    if (normalizedItems.length > 0) {
+      await SavedListItem.insertMany(
+        normalizedItems.map((it) => ({
+          listId: savedList._id,
+          productId: it.productId,
+          variantId: it.variantId || "",
+          qty: it.qty,
+        })),
+      );
+    }
+
+    const [enriched] = await fetchSavedListsByUser(req.user._id, [savedList._id]);
+    return res.status(201).json({
+      ok: true,
+      data: enriched || { ...savedList.toObject(), items: [] },
+    });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: { code: "INTERNAL_ERROR", message: e.message } });
+    return res.status(500).json({
+      ok: false,
+      error: { code: "INTERNAL_ERROR", message: e.message },
+    });
   }
-});
+};
+
+// New canonical paths
+router.post(
+  "/saved-lists",
+  requireAuth(),
+  validate(savedListCreateSchema),
+  createSavedListHandler,
+);
+router.get("/saved-lists", requireAuth(), listSavedListsHandler);
+router.put(
+  "/saved-lists/:id",
+  requireAuth(),
+  validate(savedListUpdateSchema),
+  updateSavedListHandler,
+);
+router.delete("/saved-lists/:id", requireAuth(), deleteSavedListHandler);
+router.post("/saved-lists/:id/add-to-cart", requireAuth(), addSavedListToCartHandler);
+router.post("/saved-lists/from-order/:orderId", requireAuth(), createSavedListFromOrderHandler);
+
+// Backward-compatible aliases (templates -> saved-lists)
+router.post(
+  "/templates",
+  requireAuth(),
+  validate(savedListCreateSchema),
+  createSavedListHandler,
+);
+router.get("/templates", requireAuth(), listSavedListsHandler);
+router.put(
+  "/templates/:id",
+  requireAuth(),
+  validate(savedListUpdateSchema),
+  updateSavedListHandler,
+);
+router.delete("/templates/:id", requireAuth(), deleteSavedListHandler);
+router.post("/templates/:id/add-to-cart", requireAuth(), addSavedListToCartHandler);
+router.post("/templates/from-order/:orderId", requireAuth(), createSavedListFromOrderHandler);
 
 /* ============================
    Sample Requests

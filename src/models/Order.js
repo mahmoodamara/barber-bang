@@ -27,7 +27,11 @@ const orderItemSchema = new mongoose.Schema(
     unitPrice: { type: Number, required: true, min: 0 }, // ILS major
     qty: { type: Number, required: true, min: 1, max: 999 },
 
-    categoryId: { type: mongoose.Schema.Types.ObjectId, ref: "Category", default: null },
+    categoryId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Category",
+      default: null,
+    },
 
     // Variant selection (optional)
     variantId: { type: String, default: "" },
@@ -46,7 +50,7 @@ const orderItemSchema = new mongoose.Schema(
               valueKey: { type: String, default: "" },
               unit: { type: String, default: "" },
             },
-            { _id: false }
+            { _id: false },
           ),
         ],
         default: [],
@@ -62,7 +66,7 @@ const orderItemSchema = new mongoose.Schema(
       },
     },
   },
-  { _id: false }
+  { _id: false },
 );
 
 /**
@@ -86,7 +90,7 @@ const giftItemSchema = new mongoose.Schema(
 
     qty: { type: Number, required: true, min: 1, max: 50, default: 1 },
   },
-  { _id: false }
+  { _id: false },
 );
 
 /**
@@ -132,9 +136,13 @@ const pricingSchema = new mongoose.Schema(
     // ✅ additive legacy fields (safe)
     discountTotal: { type: Number, default: 0, min: 0 },
     couponCode: { type: String, default: "" },
-    campaignId: { type: mongoose.Schema.Types.ObjectId, ref: "Campaign", default: null },
+    campaignId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Campaign",
+      default: null,
+    },
   },
-  { _id: false }
+  { _id: false },
 );
 
 /**
@@ -149,7 +157,7 @@ const pricingMinorSchema = new mongoose.Schema(
     totalAfterVat: { type: Number, default: 0, min: 0 },
     total: { type: Number, default: 0, min: 0 },
   },
-  { _id: false }
+  { _id: false },
 );
 
 /**
@@ -164,8 +172,16 @@ const shippingSchema = new mongoose.Schema(
       required: true,
     },
 
-    deliveryAreaId: { type: mongoose.Schema.Types.ObjectId, ref: "DeliveryArea", default: null },
-    pickupPointId: { type: mongoose.Schema.Types.ObjectId, ref: "PickupPoint", default: null },
+    deliveryAreaId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "DeliveryArea",
+      default: null,
+    },
+    pickupPointId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "PickupPoint",
+      default: null,
+    },
 
     // Immutable snapshots (avoid historical drift)
     deliveryAreaName: { type: String, default: "" },
@@ -197,9 +213,8 @@ const shippingSchema = new mongoose.Schema(
       notes: { type: String, default: "" },
     },
   },
-  { _id: false }
+  { _id: false },
 );
-
 
 /**
  * Stripe references
@@ -213,7 +228,7 @@ const stripeSchema = new mongoose.Schema(
     chargeId: { type: String, default: "" },
     receiptUrl: { type: String, default: "" },
   },
-  { _id: false }
+  { _id: false },
 );
 
 /**
@@ -232,7 +247,14 @@ const refundSchema = new mongoose.Schema(
 
     reason: {
       type: String,
-      enum: ["customer_cancel", "return", "out_of_stock", "fraud", "duplicate", "other"],
+      enum: [
+        "customer_cancel",
+        "return",
+        "out_of_stock",
+        "fraud",
+        "duplicate",
+        "other",
+      ],
       default: "other",
     },
 
@@ -245,7 +267,7 @@ const refundSchema = new mongoose.Schema(
     requestedAt: { type: Date, default: null },
     refundedAt: { type: Date, default: null },
   },
-  { _id: false }
+  { _id: false },
 );
 
 /**
@@ -261,7 +283,11 @@ const invoiceSchema = new mongoose.Schema(
     docId: { type: String, default: "" },
     providerDocId: { type: String, default: "" },
     idempotencyKey: { type: String, default: "" },
-    docType: { type: String, enum: ["", "invoice", "receipt_link", "other"], default: "" },
+    docType: {
+      type: String,
+      enum: ["", "invoice", "receipt_link", "other"],
+      default: "",
+    },
     number: { type: String, default: "" },
     url: { type: String, default: "" },
     issuedAt: { type: Date, default: null },
@@ -282,7 +308,11 @@ const invoiceSchema = new mongoose.Schema(
 
     allocation: {
       required: { type: Boolean, default: false },
-      status: { type: String, enum: ["none", "pending", "issued", "failed"], default: "none" },
+      status: {
+        type: String,
+        enum: ["none", "pending", "issued", "failed"],
+        default: "none",
+      },
       number: { type: String, default: "" },
       thresholdBeforeVat: { type: Number, default: 0, min: 0 },
       requestedAt: { type: Date, default: null },
@@ -290,7 +320,7 @@ const invoiceSchema = new mongoose.Schema(
       error: { type: String, default: "" },
     },
   },
-  { _id: false }
+  { _id: false },
 );
 
 /**
@@ -301,15 +331,23 @@ const cancellationSchema = new mongoose.Schema(
     requested: { type: Boolean, default: false },
     requestedAt: { type: Date, default: null },
 
-    requestedBy: { type: String, enum: ["user", "admin", "system"], default: "user" },
+    requestedBy: {
+      type: String,
+      enum: ["user", "admin", "system"],
+      default: "user",
+    },
 
     cancelledAt: { type: Date, default: null },
-    cancelledBy: { type: String, enum: ["user", "admin", "system"], default: "user" },
+    cancelledBy: {
+      type: String,
+      enum: ["user", "admin", "system"],
+      default: "user",
+    },
     reason: { type: String, default: "" },
 
     feeAmount: { type: Number, default: 0, min: 0 }, // ILS major
   },
-  { _id: false }
+  { _id: false },
 );
 
 /**
@@ -321,7 +359,14 @@ const returnSchema = new mongoose.Schema(
   {
     status: {
       type: String,
-      enum: ["none", "requested", "approved", "rejected", "received", "refunded"],
+      enum: [
+        "none",
+        "requested",
+        "approved",
+        "rejected",
+        "received",
+        "refunded",
+      ],
       default: "none",
     },
 
@@ -334,16 +379,20 @@ const returnSchema = new mongoose.Schema(
       type: [
         new mongoose.Schema(
           {
-            productId: { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: true },
+            productId: {
+              type: mongoose.Schema.Types.ObjectId,
+              ref: "Product",
+              required: true,
+            },
             qty: { type: Number, required: true, min: 1, max: 999 },
           },
-          { _id: false }
+          { _id: false },
         ),
       ],
       default: [],
     },
   },
-  { _id: false }
+  { _id: false },
 );
 
 /**
@@ -358,7 +407,7 @@ const returnRequestRefSchema = new mongoose.Schema(
       default: null,
     },
   },
-  { _id: false }
+  { _id: false },
 );
 
 /**
@@ -371,7 +420,7 @@ const idempotencySchema = new mongoose.Schema(
     cancelKey: { type: String, default: "" },
     returnKey: { type: String, default: "" },
   },
-  { _id: false }
+  { _id: false },
 );
 
 /**
@@ -383,7 +432,7 @@ const webhookSchema = new mongoose.Schema(
     lockedAt: { type: Date, default: null },
     processedAt: { type: Date, default: null },
   },
-  { _id: false }
+  { _id: false },
 );
 
 /**
@@ -399,7 +448,7 @@ const analyticsSchema = new mongoose.Schema(
     refundCountedAmountMinor: { type: Number, default: 0 },
     refundCountedReason: { type: String, default: "" },
   },
-  { _id: false }
+  { _id: false },
 );
 
 const couponReservationSchema = new mongoose.Schema(
@@ -413,7 +462,7 @@ const couponReservationSchema = new mongoose.Schema(
     reservedAt: { type: Date, default: null },
     expiresAt: { type: Date, default: null },
   },
-  { _id: false }
+  { _id: false },
 );
 
 /* ============================
@@ -422,7 +471,11 @@ const couponReservationSchema = new mongoose.Schema(
 
 const orderSchema = new mongoose.Schema(
   {
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
 
     // Optional: short readable order number (safe to add)
     orderNumber: { type: String, default: "" },
@@ -475,7 +528,11 @@ const orderSchema = new mongoose.Schema(
     shippedAt: { type: Date, default: null },
     deliveredAt: { type: Date, default: null },
 
-    paymentMethod: { type: String, enum: ["stripe", "cod", "bank_transfer", "net_terms"], required: true },
+    paymentMethod: {
+      type: String,
+      enum: ["stripe", "cod", "bank_transfer", "net_terms"],
+      required: true,
+    },
     paymentDueAt: { type: Date, default: null },
 
     // B2B fields
@@ -540,7 +597,7 @@ const orderSchema = new mongoose.Schema(
     timestamps: true,
     toJSON: { virtuals: true },
     toObject: { virtuals: true },
-  }
+  },
 );
 
 /* ============================
@@ -563,7 +620,9 @@ orderSchema.virtual("total").get(function totalVirtual() {
  * Legacy convenience: couponCode and discountTotal
  */
 orderSchema.virtual("couponCode").get(function couponCodeVirtual() {
-  return this?.pricing?.discounts?.coupon?.code ?? this?.pricing?.couponCode ?? "";
+  return (
+    this?.pricing?.discounts?.coupon?.code ?? this?.pricing?.couponCode ?? ""
+  );
 });
 
 orderSchema.virtual("discountTotal").get(function discountTotalVirtual() {
@@ -588,7 +647,8 @@ orderSchema.pre("validate", function normalizeOrderFields(next) {
     if (Array.isArray(this.items)) {
       this.items = this.items.map((it) => {
         if (!it) return it;
-        if (!it.title && (it.titleHe || it.titleAr)) it.title = it.titleHe || it.titleAr || "";
+        if (!it.title && (it.titleHe || it.titleAr))
+          it.title = it.titleHe || it.titleAr || "";
         return it;
       });
     }
@@ -597,7 +657,8 @@ orderSchema.pre("validate", function normalizeOrderFields(next) {
     if (Array.isArray(this.gifts)) {
       this.gifts = this.gifts.map((it) => {
         if (!it) return it;
-        if (!it.title && (it.titleHe || it.titleAr)) it.title = it.titleHe || it.titleAr || "";
+        if (!it.title && (it.titleHe || it.titleAr))
+          it.title = it.titleHe || it.titleAr || "";
         return it;
       });
     }
@@ -607,10 +668,13 @@ orderSchema.pre("validate", function normalizeOrderFields(next) {
     const rootPhone = String(this?.shipping?.phone || "").trim();
 
     if (!rootPhone && addrPhone) this.shipping.phone = addrPhone;
-    if (!addrPhone && rootPhone && this.shipping?.address) this.shipping.address.phone = rootPhone;
+    if (!addrPhone && rootPhone && this.shipping?.address)
+      this.shipping.address.phone = rootPhone;
 
     // pricing legacy fields (defense-in-depth)
-    const couponCode = String(this?.pricing?.discounts?.coupon?.code || "").trim();
+    const couponCode = String(
+      this?.pricing?.discounts?.coupon?.code || "",
+    ).trim();
     const couponAmt = Number(this?.pricing?.discounts?.coupon?.amount || 0);
     const campAmt = Number(this?.pricing?.discounts?.campaign?.amount || 0);
     const offerAmt = Number(this?.pricing?.discounts?.offer?.amount || 0);
@@ -642,7 +706,10 @@ orderSchema.index({ createdAt: -1 });
 
 orderSchema.index(
   { orderNumber: 1 },
-  { unique: true, partialFilterExpression: { orderNumber: { $type: "string", $ne: "" } } }
+  {
+    unique: true,
+    partialFilterExpression: { orderNumber: { $type: "string", $ne: "" } },
+  },
 );
 
 /**

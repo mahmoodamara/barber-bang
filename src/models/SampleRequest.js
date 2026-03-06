@@ -2,7 +2,11 @@ import mongoose from "mongoose";
 
 const sampleItemSchema = new mongoose.Schema(
   {
-    productId: { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: true },
+    productId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Product",
+      required: true,
+    },
     productTitle: { type: String, default: "" },
   },
   { _id: false },
@@ -10,7 +14,11 @@ const sampleItemSchema = new mongoose.Schema(
 
 const sampleRequestSchema = new mongoose.Schema(
   {
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
     requestNumber: { type: String, unique: true, sparse: true },
 
     status: {
@@ -19,7 +27,14 @@ const sampleRequestSchema = new mongoose.Schema(
       default: "submitted",
     },
 
-    items: { type: [sampleItemSchema], required: true, validate: [(v) => v.length > 0 && v.length <= 5, "1-5 sample items allowed"] },
+    items: {
+      type: [sampleItemSchema],
+      required: true,
+      validate: [
+        (v) => v.length > 0 && v.length <= 5,
+        "1-5 sample items allowed",
+      ],
+    },
     note: { type: String, maxlength: 1000, default: "" },
     adminNote: { type: String, maxlength: 1000, default: "" },
 
@@ -40,4 +55,7 @@ sampleRequestSchema.pre("save", async function (next) {
   next();
 });
 
-export const SampleRequest = mongoose.model("SampleRequest", sampleRequestSchema);
+export const SampleRequest = mongoose.model(
+  "SampleRequest",
+  sampleRequestSchema,
+);

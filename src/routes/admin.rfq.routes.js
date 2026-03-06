@@ -2,7 +2,12 @@ import express from "express";
 import { z } from "zod";
 import { RFQ } from "../models/RFQ.js";
 import { SampleRequest } from "../models/SampleRequest.js";
-import { requireAuth, requireRole, requirePermission, PERMISSIONS } from "../middleware/auth.js";
+import {
+  requireAuth,
+  requireRole,
+  requirePermission,
+  PERMISSIONS,
+} from "../middleware/auth.js";
 import { validate } from "../middleware/validate.js";
 
 const router = express.Router();
@@ -55,7 +60,12 @@ router.get("/", validate(listSchema), async (req, res) => {
       meta: { page, limit, total, pages: Math.ceil(total / limit) },
     });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: { code: "INTERNAL_ERROR", message: e.message } });
+    return res
+      .status(500)
+      .json({
+        ok: false,
+        error: { code: "INTERNAL_ERROR", message: e.message },
+      });
   }
 });
 
@@ -65,7 +75,12 @@ router.get("/", validate(listSchema), async (req, res) => {
 router.get("/:id", async (req, res) => {
   try {
     if (!isValidObjectId(req.params.id)) {
-      return res.status(404).json({ ok: false, error: { code: "NOT_FOUND", message: "RFQ not found" } });
+      return res
+        .status(404)
+        .json({
+          ok: false,
+          error: { code: "NOT_FOUND", message: "RFQ not found" },
+        });
     }
 
     const rfq = await RFQ.findById(req.params.id)
@@ -73,12 +88,22 @@ router.get("/:id", async (req, res) => {
       .lean();
 
     if (!rfq) {
-      return res.status(404).json({ ok: false, error: { code: "NOT_FOUND", message: "RFQ not found" } });
+      return res
+        .status(404)
+        .json({
+          ok: false,
+          error: { code: "NOT_FOUND", message: "RFQ not found" },
+        });
     }
 
     return res.json({ ok: true, data: rfq });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: { code: "INTERNAL_ERROR", message: e.message } });
+    return res
+      .status(500)
+      .json({
+        ok: false,
+        error: { code: "INTERNAL_ERROR", message: e.message },
+      });
   }
 });
 
@@ -108,26 +133,42 @@ router.patch("/:id/quote", validate(quoteSchema), async (req, res) => {
   try {
     const rfq = await RFQ.findById(req.params.id);
     if (!rfq) {
-      return res.status(404).json({ ok: false, error: { code: "NOT_FOUND", message: "RFQ not found" } });
+      return res
+        .status(404)
+        .json({
+          ok: false,
+          error: { code: "NOT_FOUND", message: "RFQ not found" },
+        });
     }
 
-    const { quotedItems, adminNote, expiresInDays } = req.validated?.body ?? req.body;
+    const { quotedItems, adminNote, expiresInDays } =
+      req.validated?.body ?? req.body;
 
     rfq.status = "quoted";
     rfq.quotedItems = quotedItems;
-    rfq.quotedTotal = quotedItems.reduce((sum, i) => sum + i.qty * i.unitPrice, 0);
+    rfq.quotedTotal = quotedItems.reduce(
+      (sum, i) => sum + i.qty * i.unitPrice,
+      0,
+    );
     rfq.quotedAt = new Date();
     rfq.quotedBy = req.user._id;
     if (adminNote) rfq.adminNote = adminNote;
     if (expiresInDays) {
-      rfq.expiresAt = new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000);
+      rfq.expiresAt = new Date(
+        Date.now() + expiresInDays * 24 * 60 * 60 * 1000,
+      );
     }
 
     await rfq.save();
 
     return res.json({ ok: true, data: rfq.toObject() });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: { code: "INTERNAL_ERROR", message: e.message } });
+    return res
+      .status(500)
+      .json({
+        ok: false,
+        error: { code: "INTERNAL_ERROR", message: e.message },
+      });
   }
 });
 
@@ -147,7 +188,12 @@ router.patch("/:id/status", validate(statusSchema), async (req, res) => {
   try {
     const rfq = await RFQ.findById(req.params.id);
     if (!rfq) {
-      return res.status(404).json({ ok: false, error: { code: "NOT_FOUND", message: "RFQ not found" } });
+      return res
+        .status(404)
+        .json({
+          ok: false,
+          error: { code: "NOT_FOUND", message: "RFQ not found" },
+        });
     }
 
     const { status, adminNote } = req.validated?.body ?? req.body;
@@ -158,7 +204,12 @@ router.patch("/:id/status", validate(statusSchema), async (req, res) => {
 
     return res.json({ ok: true, data: rfq.toObject() });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: { code: "INTERNAL_ERROR", message: e.message } });
+    return res
+      .status(500)
+      .json({
+        ok: false,
+        error: { code: "INTERNAL_ERROR", message: e.message },
+      });
   }
 });
 
@@ -180,7 +231,12 @@ router.get("/samples", async (req, res) => {
 
     return res.json({ ok: true, data: items });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: { code: "INTERNAL_ERROR", message: e.message } });
+    return res
+      .status(500)
+      .json({
+        ok: false,
+        error: { code: "INTERNAL_ERROR", message: e.message },
+      });
   }
 });
 
@@ -197,10 +253,16 @@ router.patch("/samples/:id", validate(sampleStatusSchema), async (req, res) => {
   try {
     const sample = await SampleRequest.findById(req.params.id);
     if (!sample) {
-      return res.status(404).json({ ok: false, error: { code: "NOT_FOUND", message: "Sample request not found" } });
+      return res
+        .status(404)
+        .json({
+          ok: false,
+          error: { code: "NOT_FOUND", message: "Sample request not found" },
+        });
     }
 
-    const { status, adminNote, trackingNumber } = req.validated?.body ?? req.body;
+    const { status, adminNote, trackingNumber } =
+      req.validated?.body ?? req.body;
     sample.status = status;
     if (adminNote) sample.adminNote = adminNote;
     if (trackingNumber) sample.trackingNumber = trackingNumber;
@@ -209,7 +271,12 @@ router.patch("/samples/:id", validate(sampleStatusSchema), async (req, res) => {
     await sample.save();
     return res.json({ ok: true, data: sample.toObject() });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: { code: "INTERNAL_ERROR", message: e.message } });
+    return res
+      .status(500)
+      .json({
+        ok: false,
+        error: { code: "INTERNAL_ERROR", message: e.message },
+      });
   }
 });
 
