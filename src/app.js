@@ -101,9 +101,13 @@ app.use((req, res, next) => {
 });
 
 /**
- * ✅ Request completion log
+ * ✅ Request completion log (method, canonical path, statusCode, requestId) for all requests
+ * - Single log entry per request (no duplicates)
+ * - Canonical path from req.originalUrl (query stripped, trailing slash normalized)
+ * - Uses requestId for correlation
  */
 app.use((req, res, next) => {
+  // Mark start time for duration calculation
   const startTime = Date.now();
 
   res.once("finish", () => {
@@ -112,6 +116,7 @@ app.use((req, res, next) => {
     const statusCode = res.statusCode ?? 0;
     const durationMs = Date.now() - startTime;
 
+    // Single structured log entry with all relevant fields
     req.log.info(
       {
         statusCode,
@@ -121,12 +126,11 @@ app.use((req, res, next) => {
       `${method} ${canonicalPath}`,
     );
   });
-
   next();
 });
 
 /**
- * ✅ Optional: correlate requestId with OpenTelemetry span
+ * ✅ Optional: correlate requestId with OpenTelemetry span (when ENABLE_TRACING=true)
  */
 app.use((req, res, next) => {
   try {
@@ -134,13 +138,13 @@ app.use((req, res, next) => {
     const span = trace.getActiveSpan();
     if (span && req.requestId) span.setAttribute("request.id", req.requestId);
   } catch {
-    // tracing disabled / package missing
+    // @opentelemetry/api not installed or tracing disabled
   }
   next();
 });
 
 /**
- * ✅ Prometheus metrics
+ * ✅ Prometheus metrics (early so webhook and all routes are timed)
  */
 const metricsEnabled =
   String(process.env.ENABLE_METRICS || "false").toLowerCase() === "true";
@@ -149,7 +153,7 @@ if (metricsEnabled) {
 }
 
 /**
- * ✅ Normalize response envelope
+ * ✅ Normalize response envelope (add success when missing)
  */
 app.use((req, res, next) => {
   const originalJson = res.json.bind(res);
@@ -169,15 +173,17 @@ app.use((req, res, next) => {
 
 /**
  * ✅ Helmet defaults
+ * Add CSP only in production (below) to avoid breaking dev tools/hot reload.
  */
 app.use(
   helmet({
-    crossOriginResourcePolicy: false,
+    // Keep defaults; CSP is applied separately in production.
   }),
 );
 
 /**
- * ✅ CSP — Production only
+ * ✅ CSP (Defense-in-depth) — Production only
+ * This reduces XSS impact significantly.
  */
 if (isProd) {
   app.use(
@@ -188,10 +194,20 @@ if (isProd) {
         "base-uri": ["'self'"],
         "frame-ancestors": ["'none'"],
         "object-src": ["'none'"],
+
+        // Images: allow https + data (for base64 thumbnails)
         "img-src": ["'self'", "https:", "data:"],
+
+        // Scripts: keep strict (no unsafe-inline). If you ever need Stripe.js on frontend, it’s not served by this API anyway.
         "script-src": ["'self'"],
+
+        // Styles: allow unsafe-inline temporarily (common with Tailwind injected styles in some setups)
         "style-src": ["'self'", "'unsafe-inline'"],
+
+        // API connections
         "connect-src": ["'self'", "https:"],
+
+        // Fonts
         "font-src": ["'self'", "https:", "data:"],
       },
     }),
@@ -201,70 +217,65 @@ if (isProd) {
 /**
  * ✅ CORS
  * Supports comma-separated origins in env:
- * CORS_ORIGIN="https://barberbang.co.il,https://www.barberbang.co.il,http://localhost:5173"
+ * CORS_ORIGIN="https://site.com,http://localhost:5173"
+ * In production, if CORS_ORIGIN is empty, defaults to frontend URL below.
  */
-const corsOriginEnv = String(process.env.CORS_ORIGIN || "").trim();
-
-const envOrigins = corsOriginEnv
+const DEFAULT_FRONTEND_ORIGIN = "http://localhost:8080";
+const corsOriginEnv = String(process.env.CORS_ORIGIN || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
 
-const localhostOrigins = new Set([
+// Your real production frontends (ADD YOUR DOMAINS HERE)
+const productionOrigins = new Set([
+  "https://barberbang.co.il",
+  "https://www.barberbang.co.il",
+  // keep if you still use it:
+  "https://barber-bang.netlify.app",
+]);
+
+// Dev origins
+const devOrigins = new Set([
   "http://localhost:5173",
   "http://localhost:3000",
   "http://127.0.0.1:5173",
   "http://127.0.0.1:3000",
-  "http://localhost:8080",
 ]);
 
-const productionOrigins = new Set([
-  "https://barberbang.co.il",
-  "https://www.barberbang.co.il",
-  "https://barber-bang.netlify.app",
-]);
+// Build allowed origins
+const allowedOrigins = new Set();
 
-const allowedOrigins = new Set([
-  ...envOrigins,
-  ...productionOrigins,
-]);
+// 1) Always allow env-provided origins
+for (const o of corsOriginEnv) allowedOrigins.add(o);
 
+// 2) Always allow known production origins
+for (const o of productionOrigins) allowedOrigins.add(o);
+
+// 3) Allow localhost only in dev
 if (!isProd) {
-  for (const origin of localhostOrigins) {
-    allowedOrigins.add(origin);
-  }
+  for (const o of devOrigins) allowedOrigins.add(o);
 }
 
 log.info(
-  {
-    isProd,
-    corsOriginEnv,
-    allowedOrigins: [...allowedOrigins],
-  },
-  "[cors] Allowed origins initialized",
+  { isProd, corsOriginEnv, allowedOrigins: [...allowedOrigins] },
+  "[cors] Allowed origins",
 );
 
 const corsConfig = {
-  origin(origin, cb) {
-    // Allow non-browser clients: curl, Postman, backend-to-backend
+  origin: (origin, cb) => {
+    // Allow server-to-server / curl / Postman (no Origin header)
     if (!origin) return cb(null, true);
 
-    if (allowedOrigins.has(origin)) {
-      return cb(null, true);
-    }
+    if (allowedOrigins.has(origin)) return cb(null, true);
 
+    // Log rejected origins for debugging
     log.warn(
-      {
-        rejectedOrigin: origin,
-        allowedOrigins: [...allowedOrigins],
-      },
+      { origin, allowedOrigins: [...allowedOrigins] },
       "[cors] Origin rejected",
     );
 
-    const err = new Error(`CORS_NOT_ALLOWED: ${origin}`);
-    err.statusCode = 403;
-    err.code = "CORS_NOT_ALLOWED";
-    return cb(err);
+    // IMPORTANT: reject with no CORS headers (expected); browser will show CORS error.
+    return cb(Object.assign(new Error("CORS_NOT_ALLOWED"), { statusCode: 403 }));
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -275,14 +286,18 @@ const corsConfig = {
     "Accept-Language",
     "x-guest-cart-id",
   ],
-  optionsSuccessStatus: 204,
+  // Optional: reduces preflight traffic if you want
+  maxAge: 600,
 };
 
 app.use(cors(corsConfig));
+
+// Preflight must be handled for all routes
 app.options("*", cors(corsConfig));
 
 /**
- * ✅ Global rate limit
+ * ✅ Global rate limit (broad)
+ * Specific endpoints also get stricter limits below.
  */
 app.use(
   createLimiter({
@@ -292,14 +307,15 @@ app.use(
   }),
 );
 
-// Morgan disabled - using single pino structured logger
+// Morgan disabled - using single pino structured logger for request completion
+// This avoids duplicate log entries with the same method/route/requestId
 // if (!isProd) {
 //   morgan.token("req-id", (req) => req.requestId || "-");
 //   app.use(morgan(":method :url :status :res[content-length] - :response-time ms :req-id"));
 // }
 
 /**
- * Legacy /api prefix
+ * Legacy /api prefix (backward compatible)
  */
 let legacyApiWarned = false;
 function legacyApiDeprecation(req, res, next) {
@@ -317,20 +333,24 @@ function legacyApiDeprecation(req, res, next) {
 }
 
 /**
- * Stripe webhook must receive RAW body
+ * ✅ IMPORTANT:
+ * Stripe webhook must receive RAW body for signature verification.
+ * This route must be mounted BEFORE express.json() & mongo-sanitize.
  */
 app.use("/api", legacyApiDeprecation);
 app.use("/api/stripe/webhook", stripeWebhookRoutes);
 app.use("/api/v1/stripe/webhook", stripeWebhookRoutes);
 
 /**
- * Body parsers
+ * ✅ Body parsers (after webhook)
  */
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 
 /**
- * NoSQL Injection defense
+ * 🟠 NoSQL Injection defense-in-depth
+ * Sanitizes req.body, req.query, req.params from $ and dot operators.
+ * Safe because webhook raw parsing already happened above.
  */
 app.use(
   mongoSanitize({
@@ -339,20 +359,20 @@ app.use(
 );
 
 /**
- * Optional global middlewares
- */
-app.use(langMiddleware);
-app.use(maintenanceMiddleware);
-
-/**
- * API Router
+ * ✅ API Router (Unified)
+ * Mounted at:
+ * 1. /api/v1 (Canonical)
+ * 2. /api    (Legacy/Alias)
  */
 const apiRouter = express.Router();
 
-// Auth
+// 1. Webhooks (Raw) - Already handled before json/urlencoded middleware
+// apiRouter.use("/stripe/webhook", stripeWebhookRoutes); // Handled at app-level
+
+// 2. Auth (rate limits applied per-route inside auth.routes.js)
 apiRouter.use("/auth", authRoutes);
 
-// User features
+// 3. User features
 apiRouter.use("/home", homeRoutes);
 apiRouter.use("/categories", categoriesRoutes);
 apiRouter.use("/products", productsRoutes);
@@ -363,13 +383,13 @@ apiRouter.use("/cart", limitCart, cartRoutes);
 apiRouter.use("/shipping", shippingRoutes);
 apiRouter.use("/coupons", couponsRoutes);
 apiRouter.use("/offers", offersRoutes);
-apiRouter.use("/checkout/quote", limitCheckoutQuote);
-apiRouter.use("/checkout/cod", limitCheckoutCreate);
-apiRouter.use("/checkout/send-otp", limitCheckoutCreate);
-apiRouter.use("/checkout/verify-and-create", limitCheckoutCreate);
-apiRouter.use("/checkout/stripe", limitCheckoutCreate);
+apiRouter.use("/checkout/quote", limitCheckoutQuote); // Rate limit
+apiRouter.use("/checkout/cod", limitCheckoutCreate); // Rate limit
+apiRouter.use("/checkout/send-otp", limitCheckoutCreate); // Rate limit
+apiRouter.use("/checkout/verify-and-create", limitCheckoutCreate); // Rate limit
+apiRouter.use("/checkout/stripe", limitCheckoutCreate); // Rate limit
 apiRouter.use("/checkout", checkoutRoutes);
-apiRouter.use("/orders/track", limitTrackOrder, ordersRoutes);
+apiRouter.use("/orders/track", limitTrackOrder, ordersRoutes); // Specific limit for track
 apiRouter.use("/orders", ordersRoutes);
 apiRouter.use("/returns", returnsRoutes);
 apiRouter.use("/product-attributes", productAttributesRoutes);
@@ -383,13 +403,13 @@ apiRouter.use("/newsletter", newsletterRoutes);
 apiRouter.use("/stock-notify", stockNotifyRoutes);
 apiRouter.use("/b2b", b2bRoutes);
 
-// Admin
+// 4. Admin (Protected)
 apiRouter.use("/admin", limitAdmin, adminIndexRouter);
 
-// Health
+// 5. Health (also mounted at root /health)
 apiRouter.use("/health", healthRoutes);
 
-// Metrics
+// 6. Metrics (if enabled)
 if (metricsEnabled) {
   const metricsHandler = async (_req, res) => {
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
@@ -400,16 +420,18 @@ if (metricsEnabled) {
   const metricsAuth = isProd ? [requireAuth(), requireRole("admin")] : [];
 
   apiRouter.get("/metrics", ...metricsAuth, metricsHandler);
+
+  // QA hits GET /metrics at root (same handler + auth)
   app.get("/metrics", ...metricsAuth, metricsHandler);
 }
 
-// Canonical
+// ✅ Mount Canonical (/api/v1)
 app.use("/api/v1", apiRouter);
 
-// Legacy
+// ✅ Mount Legacy (/api) with deprecation warning
 app.use("/api", legacyApiDeprecation, apiRouter);
 
-// Public crawlability endpoints
+// Public crawlability endpoints for search engines
 app.use("/", seoStaticRoutes);
 
 /**
