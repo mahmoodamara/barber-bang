@@ -1,5 +1,7 @@
 import mongoose from "mongoose";
 
+const HERO_MEDIA_TYPES = new Set(["image", "slider", "video"]);
+
 const sectionSchema = new mongoose.Schema({
     id: { type: String, required: true }, // unique UI id
     type: {
@@ -45,9 +47,30 @@ function validateSectionPayload(section) {
     // Type-specific structural checks (non-exhaustive, defensive)
     switch (type) {
         case "hero":
-            // hero may have: imageUrl, title, subtitle, ctaText, ctaLink
+            // hero may have: mediaType, imageUrl, images[], videoUrl, title, subtitle, ctaText, ctaLink
+            if (payload.mediaType && (typeof payload.mediaType !== "string" || !HERO_MEDIA_TYPES.has(payload.mediaType))) {
+                return "hero.mediaType must be one of: image, slider, video";
+            }
             if (payload.imageUrl && typeof payload.imageUrl !== "string") {
                 return "hero.imageUrl must be a string";
+            }
+            if (payload.videoUrl && typeof payload.videoUrl !== "string") {
+                return "hero.videoUrl must be a string";
+            }
+            if (payload.videoPosterUrl && typeof payload.videoPosterUrl !== "string") {
+                return "hero.videoPosterUrl must be a string";
+            }
+            if (payload.images != null) {
+                if (!Array.isArray(payload.images)) {
+                    return "hero.images must be an array of strings";
+                }
+                if (payload.images.length > 12) {
+                    return "hero.images cannot exceed 12 items";
+                }
+                const hasInvalidImage = payload.images.some((item) => item && typeof item !== "string");
+                if (hasInvalidImage) {
+                    return "hero.images must contain only strings";
+                }
             }
             break;
 

@@ -221,51 +221,45 @@ if (isProd) {
  * In production, if CORS_ORIGIN is empty, defaults to frontend URL below.
  */
 const DEFAULT_FRONTEND_ORIGIN = "http://localhost:8080";
-const corsOriginEnv = String(process.env.CORS_ORIGIN || "")
+const corsOriginEnv = String(process.env.CORS_ORIGIN || "").trim();
+let corsOriginList = corsOriginEnv
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
 
-// Your real production frontends (ADD YOUR DOMAINS HERE)
-const productionOrigins = new Set([
-  "https://barberbang.co.il",
-  "https://www.barberbang.co.il",
-  // keep if you still use it:
-  "https://barber-bang.netlify.app",
-]);
+// Always include default frontend origin (fixes CORS when env not set on Render)
+if (!corsOriginList.includes(DEFAULT_FRONTEND_ORIGIN)) {
+  corsOriginList.push(DEFAULT_FRONTEND_ORIGIN);
+}
 
-// Dev origins
-const devOrigins = new Set([
+log.info({ corsOriginList, isProd }, "[cors] Allowed origins");
+
+const localhostOrigins = new Set([
   "http://localhost:5173",
   "http://localhost:3000",
   "http://127.0.0.1:5173",
   "http://127.0.0.1:3000",
+  "http://localhost:8080",
 ]);
 
-// Build allowed origins
-const allowedOrigins = new Set();
+// Production frontend origins (always allowed)
+const productionOrigins = new Set([
+  "http://localhost:8080",
+  "https://barber-bang.netlify.app",
+]);
 
-// 1) Always allow env-provided origins
-for (const o of corsOriginEnv) allowedOrigins.add(o);
-
-// 2) Always allow known production origins
+const allowedOrigins = new Set(corsOriginList);
+// Always allow production frontend origins
 for (const o of productionOrigins) allowedOrigins.add(o);
-
-// 3) Allow localhost only in dev
+// Allow localhost origins in development
 if (!isProd) {
-  for (const o of devOrigins) allowedOrigins.add(o);
+  for (const o of localhostOrigins) allowedOrigins.add(o);
 }
-
-log.info(
-  { isProd, corsOriginEnv, allowedOrigins: [...allowedOrigins] },
-  "[cors] Allowed origins",
-);
 
 const corsConfig = {
   origin: (origin, cb) => {
-    // Allow server-to-server / curl / Postman (no Origin header)
+    // Allow server-to-server / curl / Postman with no origin
     if (!origin) return cb(null, true);
-
     if (allowedOrigins.has(origin)) return cb(null, true);
 
     // Log rejected origins for debugging
@@ -274,8 +268,10 @@ const corsConfig = {
       "[cors] Origin rejected",
     );
 
-    // IMPORTANT: reject with no CORS headers (expected); browser will show CORS error.
-    return cb(Object.assign(new Error("CORS_NOT_ALLOWED"), { statusCode: 403 }));
+    const err = new Error("CORS_NOT_ALLOWED");
+    err.statusCode = 403;
+    err.code = "CORS_NOT_ALLOWED";
+    return cb(err);
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -286,14 +282,10 @@ const corsConfig = {
     "Accept-Language",
     "x-guest-cart-id",
   ],
-  // Optional: reduces preflight traffic if you want
-  maxAge: 600,
 };
 
 app.use(cors(corsConfig));
-
-// Preflight must be handled for all routes
-app.options("*", cors(corsConfig));
+app.options("*", cors(corsConfig), (_req, res) => res.sendStatus(204));
 
 /**
  * ✅ Global rate limit (broad)

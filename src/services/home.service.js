@@ -134,6 +134,32 @@ function normalizeText(value) {
   return value.trim();
 }
 
+function normalizeUrlArray(values) {
+  if (!Array.isArray(values)) return [];
+
+  const unique = [];
+  const seen = new Set();
+
+  for (const value of values) {
+    const normalized = normalizeText(value);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    unique.push(normalized);
+  }
+
+  return unique;
+}
+
+function inferHeroMediaType(payload, images, imageUrl, videoUrl) {
+  const requestedType = normalizeText(payload?.mediaType);
+  if (requestedType === "image" || requestedType === "slider" || requestedType === "video") {
+    return requestedType;
+  }
+  if (videoUrl) return "video";
+  if (images.length > 1) return "slider";
+  return imageUrl ? "image" : "";
+}
+
 function pickHeroSectionPayload(layoutDoc) {
   const sections = Array.isArray(layoutDoc?.sections) ? layoutDoc.sections : [];
 
@@ -144,7 +170,13 @@ function pickHeroSectionPayload(layoutDoc) {
   const payload = heroSection?.payload;
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
 
+  const images = normalizeUrlArray(payload.images);
+  const imageUrl = normalizeText(payload.imageUrl) || images[0] || "";
+  const videoUrl = normalizeText(payload.videoUrl);
+  const mediaType = inferHeroMediaType(payload, images, imageUrl, videoUrl);
+
   const hero = {
+    mediaType,
     titleHe: normalizeText(payload.titleHe),
     titleAr: normalizeText(payload.titleAr),
     subtitleHe: normalizeText(payload.subtitleHe),
@@ -152,12 +184,17 @@ function pickHeroSectionPayload(layoutDoc) {
     ctaTextHe: normalizeText(payload.ctaTextHe),
     ctaTextAr: normalizeText(payload.ctaTextAr),
     ctaLink: normalizeText(payload.ctaLink),
-    imageUrl: normalizeText(payload.imageUrl),
-    videoUrl: normalizeText(payload.videoUrl),
-    videoPosterUrl: normalizeText(payload.videoPosterUrl || payload.posterUrl || payload.imageUrl),
+    imageUrl,
+    images,
+    videoUrl,
+    videoPosterUrl: normalizeText(payload.videoPosterUrl || payload.posterUrl || imageUrl),
+    slideIntervalMs: 5000,
   };
 
-  const hasAnyContent = Object.values(hero).some(Boolean);
+  const hasAnyContent = Object.entries(hero).some(([key, value]) => {
+    if (key === "images") return Array.isArray(value) && value.length > 0;
+    return Boolean(value);
+  });
   return hasAnyContent ? hero : null;
 }
 
